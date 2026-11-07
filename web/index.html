@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#1455D9"><meta name="description" content="IwacuMall – your home of everything. Discover everyday essentials, shop effortlessly and order with confidence.">
+  <title>IwacuMall | Your home of everything</title>
+  <link rel="icon" href="/assets/favicon.png"><link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <div class="announcement"><span class="announcement-dot"></span> Welcome to IwacuMall <span class="announcement-sep">•</span> Your home of everything <span class="announcement-dot"></span></div>
+  <header class="site-header">
+    <div class="container header-row">
+      <a class="brand" href="/" aria-label="IwacuMall home"><img src="/assets/favicon.png" alt=""><span>Iwacu<span class="brand-accent">Mall</span><span class="brand-suffix">.com</span></span></a>
+      <nav class="desktop-nav" aria-label="Main navigation"><a class="nav-active" href="/">Home</a><a href="#categories">Categories</a><a href="#products">Shop all</a><a href="#why">Why IwacuMall</a></nav>
+      <div class="header-actions">
+        <button class="icon-btn search-toggle" id="focusSearch" aria-label="Search products"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.9" cy="10.9" r="6.8"/><path d="m16 16 5 5"/></svg></button>
+        <button class="icon-btn" id="accountBtn" aria-label="Your account"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.7"/><path d="M4.5 20c.4-4 3.1-6 7.5-6s7.1 2 7.5 6"/></svg></button>
+        <button class="cart-trigger" id="cartBtn" aria-label="Open shopping cart"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h2l2.1 11.2h10.5L20 8H6"/><circle cx="10" cy="19.2" r="1"/><circle cx="17" cy="19.2" r="1"/></svg><span>Cart</span><b id="cartBadge">0</b></button>
+      </div>
+    </div>
+  </header>
+  <main>
+    <section class="hero">
+      <div class="container hero-inner">
+        <div class="hero-copy">
+          <div class="eyebrow"><span class="eyebrow-star">✦</span> WELCOME TO YOUR NEW FAVORITE MALL</div>
+          <h1>Everything you love.<br><em>All in one place.</em></h1>
+          <p>Discover everyday essentials, delightful finds and a simpler way to shop. Your favorite things are only a few clicks away.</p>
+          <div class="hero-buttons"><a class="btn btn-yellow" href="#products">Explore products <span>↗</span></a><a class="btn btn-white-line" href="#categories">Browse categories <span>→</span></a></div>
+          <div class="hero-foot"><span class="hero-foot-icon">✓</span> Smooth ordering <span class="hero-foot-divider"></span> <span class="hero-foot-icon">✓</span> Secure accounts <span class="hero-foot-divider"></span> <span class="hero-foot-icon">✓</span> Local convenience</div>
+        </div>
+        <div class="hero-art" aria-hidden="true">
+          <div class="art-circle art-circle-one"></div><div class="art-circle art-circle-two"></div>
+          <div class="hero-glow"></div>
+          <div class="float-pill float-pill-left"><span class="float-icon">✦</span> Good finds, every day</div>
+          <img src="/assets/iwacumall-icon-optimized.webp" alt="" class="hero-brand-art">
+          <div class="float-pill float-pill-right"><span class="green-dot"></span> All you need, in one place</div>
+          <div class="spark spark-one">✧</div><div class="spark spark-two">✦</div>
+        </div>
+      </div>
+      <div class="hero-bottom-wave"></div>
+    </section>
+    <section class="benefits container" aria-label="Shopping benefits">
+      <div class="benefit"><div class="benefit-icon">🛍️</div><div><strong>Shop with ease</strong><span>Simple from start to finish</span></div></div>
+      <div class="benefit"><div class="benefit-icon">✨</div><div><strong>Great everyday finds</strong><span>Discover more in one place</span></div></div>
+      <div class="benefit"><div class="benefit-icon">📦</div><div><strong>Stay on top of orders</strong><span>Follow each order status</span></div></div>
+      <div class="benefit"><div class="benefit-icon">💙</div><div><strong>Made for your life</strong><span>Shopping that feels like home</span></div></div>
+    </section>
+    <section class="categories-section section-padding" id="categories">
+      <div class="container">
+        <div class="section-label">✦ EXPLORE MORE</div>
+        <div class="section-heading-row"><div><h2>Shop by <span>category</span></h2><p>Whatever you're looking for, it starts here.</p></div><a class="text-link" href="#products">See all products ↗</a></div>
+        <div class="category-grid" id="categoryGrid"><div class="loading-copy">Loading categories…</div></div>
+      </div>
+    </section>
+    <section class="products-section section-padding" id="products">
+      <div class="container">
+        <div class="section-label">✦ HANDPICKED FOR YOU</div>
+        <div class="section-heading-row"><div><h2>Discover your <span>next favorite</span></h2><p>Explore our collection of everyday essentials and more.</p></div><div class="search-wrap"><svg viewBox="0 0 24 24"><circle cx="10.7" cy="10.7" r="6.5"/><path d="m16 16 4.5 4.5"/></svg><input id="searchInput" type="search" placeholder="Search products..." autocomplete="off" aria-label="Search products"></div></div>
+        <div class="filter-bar"><div class="chip-group" id="filterChips"></div><p id="resultCount" class="result-count"></p></div>
+        <div id="productsGrid" class="products-grid"><div class="loading-copy">Loading our collection…</div></div>
+        <p class="demo-notice"><strong>Preview catalog:</strong> Product names, prices and images are demonstration content and will be replaced with the client's actual inventory.</p>
+      </div>
+    </section>
+    <section class="callout-section" id="why"><div class="container callout-card"><div class="callout-content"><div class="section-label yellow-label">✦ SHOP SMARTER, LIVE BRIGHTER</div><h2>Made to feel <span>like home.</span></h2><p>From your morning essentials to the things that make life special—bring your everyday shopping together with IwacuMall.</p><a class="btn btn-yellow" href="#products">Start shopping <span>↗</span></a></div><div class="callout-symbol" aria-hidden="true"><img src="/assets/favicon.png" alt=""></div></div></section>
+  </main>
+  <footer class="footer"><div class="container footer-upper"><div><a href="/" class="brand footer-brand"><img src="/assets/favicon.png" alt=""><span>Iwacu<span class="brand-accent">Mall</span><span class="brand-suffix">.com</span></span></a><p>Your home of everything. Shop smart, discover more, and enjoy the little things.</p></div><div><strong>Explore</strong><a href="#products">Shop all</a><a href="#categories">Categories</a><a href="#why">About us</a></div><div><strong>Your account</strong><button data-action="open-account">Sign in / Register</button><a href="/orders">My orders</a><a href="/admin">Admin dashboard</a></div><div><strong>Visit or call</strong><a id="footerStoreAddress" href="https://maps.google.com/?q=Downtown+Kigali" target="_blank" rel="noopener noreferrer">Downtown Kigali</a><a id="footerStorePhone" href="tel:+250788651421">+250 788 651 421</a><p>Delivery fees are confirmed by the store. Cash on delivery for the preview.</p></div></div><div class="container footer-bottom"><span>© <span id="year"></span> IwacuMall. All rights reserved.</span><span>Made for everyday possibilities ✦</span></div></footer>
+  <div class="overlay" id="overlay" hidden></div>
+  <aside class="cart-drawer" id="cartDrawer" role="dialog" aria-modal="true" aria-label="Shopping cart" aria-hidden="true"><div class="drawer-head"><div><span class="section-label">YOUR FAVORITES</span><h2>Your cart <small id="drawerCartCount"></small></h2></div><button class="close-btn" data-action="close-overlay" aria-label="Close cart">×</button></div><div id="cartItems" class="drawer-items"></div><div class="drawer-bottom"><div class="total-row"><span>Subtotal</span><strong id="cartTotal">RWF 0</strong></div><p>Delivery charges, if any, are confirmed separately by the store.</p><button class="btn btn-primary full" id="checkoutBtn">Proceed to checkout <span>→</span></button><button class="btn btn-subtle full" data-action="close-overlay">Continue shopping</button></div></aside>
+  <div class="modal-holder" id="modalHolder" aria-live="polite"></div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

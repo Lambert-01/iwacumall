@@ -1,0 +1,13 @@
+{
+  "name": "iwacumall-fullstack",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "IwacuMall e-commerce website, Node API, SQLite and Flutter Android client",
+  "engines": { "node": ">=22.13.0" },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server/index.mjs",
+    "dev": "node --watch --env-file-if-exists=.env server/index.mjs",
+    "test": "node --test tests/*.test.mjs"
+  }
+}

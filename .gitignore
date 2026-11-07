@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+data/
+node_modules/
+mobile/.dart_tool/
+mobile/.flutter-plugins*
+mobile/build/
+mobile/android/.gradle/
+mobile/ios/Pods/
+.DS_Store
+*.log

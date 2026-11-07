@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#1455d9">
+  <meta name="description" content="Manage IwacuMall products, inventory and customer orders.">
+  <title>IwacuMall | Admin workspace</title>
+  <link rel="icon" href="/assets/favicon.png">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/dashboard.js"></script>
+</head>
+<body class="admin-body" data-page="admin">
+  <header class="admin-topbar">
+    <a class="brand" href="/" aria-label="IwacuMall storefront">
+      <img src="/assets/favicon.png" alt=""><span>Iwacu<span class="brand-accent">Mall</span></span>
+    </a>
+    <div class="admin-top-actions">
+      <span class="admin-store-state"><i></i> Store workspace</span>
+      <a class="btn btn-subtle" href="/">View storefront <span>↗</span></a>
+      <button class="btn btn-primary" id="signOutBtn">Sign out</button>
+    </div>
+  </header>
+
+  <main class="admin-layout">
+    <aside class="admin-sidebar" aria-label="Admin navigation">
+      <div class="sidebar-caption">WORKSPACE</div>
+      <nav class="admin-nav">
+        <button class="active" data-tab="orders"><span>▤</span> Orders <b id="sidebarOrderCount"></b></button>
+        <button data-tab="products"><span>▦</span> Products</button>
+        <button data-tab="categories"><span>◈</span> Categories</button>
+      </nav>
+      <div class="sidebar-spacer"></div>
+      <div class="sidebar-contact">
+        <span class="contact-mark">✦</span>
+        <strong>IwacuMall store</strong>
+        <span id="sidebarStoreAddress">Downtown Kigali</span>
+        <a id="sidebarStorePhone" href="tel:+250788651421">+250 788 651 421</a>
+      </div>
+      <a class="sidebar-home" href="/">← Back to shop</a>
+    </aside>
+
+    <section class="admin-main">
+      <div id="adminLocked" class="admin-locked" hidden>
+        <div class="locked-symbol">🔐</div>
+        <div class="section-label">SECURE WORKSPACE</div>
+        <h1>Administrator access required</h1>
+        <p>Sign in with the administrator account configured for this store to manage orders and products.</p>
+        <a href="/" class="btn btn-primary">Go to sign in <span>→</span></a>
+      </div>
+
+      <div id="adminContent" hidden>
+        <div class="admin-page-heading">
+          <div>
+            <div class="section-label">YOUR STORE, AT A GLANCE</div>
+            <h1>Good to see you, <span id="adminGreeting">Administrator</span></h1>
+            <p>Keep orders moving and your catalog up to date.</p>
+          </div>
+          <div class="admin-date-chip"><span>●</span> Store dashboard</div>
+        </div>
+
+        <div class="stat-grid admin-stat-grid" id="statGrid" aria-live="polite"></div>
+
+        <section id="panel-orders" class="admin-panel active" aria-labelledby="ordersHeading">
+          <div class="admin-section-head">
+            <div><div class="section-label">FULFILLMENT</div><h2 id="ordersHeading">Customer orders</h2><p>Review each order and update its fulfillment status.</p></div>
+            <button class="action-btn refresh-btn" id="refreshOrders"><span>↻</span> Refresh orders</button>
+          </div>
+          <div class="admin-toolbar">
+            <label class="admin-search"><span>⌕</span><input id="orderSearch" type="search" placeholder="Search order, customer or phone" aria-label="Search orders"></label>
+            <select class="form-control toolbar-select" id="orderStatusFilter" aria-label="Filter orders by status">
+              <option value="all">All statuses</option><option>PLACED</option><option>CONFIRMED</option><option>PACKING</option><option>OUT_FOR_DELIVERY</option><option>DELIVERED</option><option>CANCELLED</option>
+            </select>
+          </div>
+          <div id="adminOrders" class="admin-order-list" aria-live="polite"></div>
+        </section>
+
+        <section id="panel-products" class="admin-panel" aria-labelledby="productsHeading">
+          <div class="admin-section-head">
+            <div><div class="section-label">CATALOG</div><h2 id="productsHeading">Products and inventory</h2><p>Update product details, pricing, and available stock.</p></div>
+          </div>
+          <div class="admin-products-layout">
+            <section class="admin-card create-product-card">
+              <div class="admin-card-title"><span class="admin-card-icon">＋</span><div><h3>Add a product</h3><p>New items appear in the storefront catalog.</p></div></div>
+              <form id="createProduct" class="admin-form">
+                <label>Product name<input name="name" class="form-control" placeholder="e.g. Fresh mangoes" required></label>
+                <div class="form-two">
+                  <label>Price (RWF)<input name="price" type="number" class="form-control" min="0" step="1" required></label>
+                  <label>Stock quantity<input name="stock" type="number" class="form-control" min="0" step="1" required></label>
+                </div>
+                <label>Category<select id="adminCategorySelect" name="categorySlug" class="form-control" required></select></label>
+                <label>Description<textarea class="form-control" name="description" rows="3" placeholder="A short description for shoppers"></textarea></label>
+                <label>Product image URL<input class="form-control" name="imageUrl" placeholder="https://… or /assets/products/…"></label>
+                <label class="admin-check"><input type="checkbox" name="featured" value="1"><span>Feature this product on the shop</span></label>
+                <button class="btn btn-primary full" type="submit">Add to catalog <span>→</span></button>
+              </form>
+            </section>
+            <section class="admin-card inventory-card">
+              <div class="admin-card-title inventory-title"><div><h3>Catalog inventory</h3><p id="productCount">Manage listing details and stock.</p></div><label class="admin-search compact-search"><span>⌕</span><input id="productSearch" type="search" placeholder="Find a product" aria-label="Search products"></label></div>
+              <div id="adminProducts" class="admin-product-list" aria-live="polite"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="panel-categories" class="admin-panel" aria-labelledby="categoriesHeading">
+          <div class="admin-section-head">
+            <div><div class="section-label">SHOP ORGANIZATION</div><h2 id="categoriesHeading">Product categories</h2><p>Keep browsing simple by grouping related products.</p></div>
+          </div>
+          <div class="admin-categories-layout">
+            <section class="admin-card category-create-card">
+              <div class="admin-card-title"><span class="admin-card-icon">◈</span><div><h3>Create a category</h3><p>Use a short, shopper-friendly name.</p></div></div>
+              <form id="createCategory" class="category-form">
+                <label>Category name<input name="name" class="form-control" placeholder="e.g. Books & Stationery" required></label>
+                <button class="btn btn-primary" type="submit">Create category <span>→</span></button>
+              </form>
+            </section>
+            <section class="admin-card">
+              <div class="admin-card-title"><div><h3>Store categories</h3><p>These categories are visible to shoppers.</p></div></div>
+              <div id="adminCategories" class="admin-category-list" aria-live="polite"></div>
+            </section>
+          </div>
+        </section>
+      </div>
+    </section>
+  </main>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
