@@ -350,11 +350,24 @@ export const categories = {
 // ─── Products ────────────────────────────────────────────────────────────────
 
 export const products = {
-  async list({ categorySlug, search, featured, limit = 80, page = 1, skip = null, includeInactive = false } = {}) {
+  async list({ categorySlug, search, featured, limit = 80, page = 1, skip = null, includeInactive = false, adminStatus = 'all', condition = 'all', sort = 'featured' } = {}) {
     const query = {};
-    if (!includeInactive) query.active = true;
+    if (!includeInactive) {
+      query.active = true;
+      query.deletedAt = { $exists: false };
+    } else if (adminStatus === 'listed') {
+      query.active = { $ne: false };
+      query.deletedAt = { $exists: false };
+    } else if (adminStatus === 'unavailable') {
+      query.active = false;
+      query.deletedAt = { $exists: false };
+    } else if (adminStatus === 'deleted') {
+      query.deletedAt = { $exists: true };
+    }
     if (categorySlug && categorySlug !== 'all') query.categorySlug = categorySlug;
     if (featured) query.featured = true;
+    if (condition === 'preowned') query.isSecondHand = true;
+    if (condition === 'new') query.isSecondHand = { $ne: true };
     if (search) {
       const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
       query.$or = [{ name: re }, { description: re }];
@@ -363,9 +376,15 @@ export const products = {
     const effectiveLimit = Math.min(200, Math.max(1, Number(limit) || 80));
     const effectiveSkip = skip !== null ? Math.max(0, Number(skip)) : Math.max(0, (Number(page) - 1) * effectiveLimit);
 
+    const sortOptions = {
+      featured: { featured: -1, createdAt: -1 },
+      newest: { createdAt: -1 },
+      'price-asc': { price: 1, createdAt: -1 },
+      'price-desc': { price: -1, createdAt: -1 },
+    };
     const [items, total, allCategories] = await Promise.all([
       col('products').find(query)
-        .sort({ featured: -1, createdAt: -1 })
+        .sort(sortOptions[sort] || sortOptions.featured)
         .skip(effectiveSkip)
         .limit(effectiveLimit)
         .project({ _id: 0, passwordHash: 0 })
@@ -468,6 +487,17 @@ export const products = {
 };
 
 // ─── Orders ──────────────────────────────────────────────────────────────────
+
+function adminOrderQuery({ status, paymentStatus, search, includeArchived = false } = {}) {
+  const query = { adminArchivedAt: includeArchived ? { $exists: true } : { $exists: false } };
+  if (status) query.fulfillmentStatus = status;
+  if (paymentStatus) query.paymentStatus = paymentStatus;
+  if (search) {
+    const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    query.$or = [{ id: re }, { customerName: re }, { phone: re }, { city: re }, { invoiceNumber: re }];
+  }
+  return query;
+}
 
 export const orders = {
   /**
@@ -643,15 +673,11 @@ export const orders = {
       .sort({ createdAt: -1 }).skip(skip).limit(limit).toArray();
   },
   async listAdmin({ limit = 100, skip = 0, status, paymentStatus, search, includeArchived = false } = {}) {
-    const query = { adminArchivedAt: includeArchived ? { $exists: true } : { $exists: false } };
-    if (status)        query.fulfillmentStatus = status;
-    if (paymentStatus) query.paymentStatus = paymentStatus;
-    if (search) {
-      const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-      query.$or = [{ id: re }, { customerName: re }, { phone: re }, { city: re }, { invoiceNumber: re }];
-    }
-    return col('orders').find(query, { projection: { _id: 0 } })
+    return col('orders').find(adminOrderQuery({ status, paymentStatus, search, includeArchived }), { projection: { _id: 0 } })
       .sort({ createdAt: -1 }).skip(skip).limit(limit).toArray();
+  },
+  async countAdmin(filters = {}) {
+    return col('orders').countDocuments(adminOrderQuery(filters));
   },
   async countOpen() {
     return col('orders').countDocuments({

@@ -59,8 +59,16 @@
         <div class="section-label">✦ HANDPICKED FOR YOU</div>
         <div class="section-heading-row"><div><h2>Discover your <span>next favorite</span></h2><p>Explore our collection of everyday essentials and more.</p></div><div class="search-wrap"><svg viewBox="0 0 24 24"><circle cx="10.7" cy="10.7" r="6.5"/><path d="m16 16 4.5 4.5"/></svg><input id="searchInput" type="search" placeholder="Search products..." autocomplete="off" aria-label="Search products"></div></div>
         <div class="filter-bar"><div class="chip-group" id="filterChips"></div><p id="resultCount" class="result-count"></p></div>
+        <div class="storefront-product-tools" aria-label="Refine products">
+          <label>Condition<select id="conditionFilter" class="storefront-filter"><option value="all">All conditions</option><option value="new">New</option><option value="preowned">Pre-owned</option></select></label>
+          <label>Sort by<select id="sortFilter" class="storefront-filter"><option value="featured">Featured</option><option value="newest">Newest</option><option value="price-asc">Price: low to high</option><option value="price-desc">Price: high to low</option></select></label>
+        </div>
         <div id="productsGrid" class="products-grid"><div class="loading-copy">Loading our collection…</div></div>
-        <div class="products-load-more"><button id="loadMoreProducts" class="btn btn-subtle" type="button" hidden>Load more products</button></div>
+        <nav class="storefront-pagination" id="productsPagination" aria-label="Product pages">
+          <button class="btn btn-subtle" id="previousProducts" type="button">← Previous</button>
+          <span id="productsPageInfo" aria-live="polite">Page 1 of 1</span>
+          <button class="btn btn-subtle" id="nextProducts" type="button">Next →</button>
+        </nav>
         <p class="demo-notice"><strong>Preview catalog:</strong> Product names, prices and images are demonstration content and will be replaced with the client's actual inventory.</p>
       </div>
     </section>

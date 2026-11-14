@@ -383,9 +383,11 @@ async function api(req, res, url) {
     const categorySlug = cleanText(url.searchParams.get('category') || '', 60);
     const search   = cleanText(url.searchParams.get('search') || '', 100);
     const featured = url.searchParams.get('featured') === '1';
+    const condition = ['new', 'preowned'].includes(url.searchParams.get('condition')) ? url.searchParams.get('condition') : 'all';
+    const sort = ['featured', 'newest', 'price-asc', 'price-desc'].includes(url.searchParams.get('sort')) ? url.searchParams.get('sort') : 'featured';
     const limit    = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 80));
     const page     = Math.max(1, Number(url.searchParams.get('page')) || 1);
-    const result   = await products.list({ categorySlug: categorySlug || undefined, search: search || undefined, featured, limit, page });
+    const result   = await products.list({ categorySlug: categorySlug || undefined, search: search || undefined, featured, condition, sort, limit, page });
     return json(res, 200, result);
   }
 
@@ -977,16 +979,26 @@ async function api(req, res, url) {
     const includeArchived = url.searchParams.get('includeArchived') === 'true';
     const rawLimit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : Number.NaN;
     const rawSkip = url.searchParams.has('skip') ? Number(url.searchParams.get('skip')) : Number.NaN;
-    const limit  = Number.isSafeInteger(rawLimit) ? Math.min(200, Math.max(1, rawLimit)) : 100;
+    const limit  = Number.isSafeInteger(rawLimit) ? Math.min(100, Math.max(1, rawLimit)) : 10;
     const skip   = Number.isSafeInteger(rawSkip) ? Math.min(1_000_000, Math.max(0, rawSkip)) : 0;
-    const result = await orders.listAdmin({
-      limit, skip,
+    const filters = {
       status:        status        || undefined,
       paymentStatus: paymentStatus || undefined,
       search:        search        || undefined,
       includeArchived,
+    };
+    const [result, total, openCount] = await Promise.all([orders.listAdmin({
+      limit, skip,
+      ...filters,
+    }), orders.countAdmin(filters), orders.countOpen()]);
+    return json(res, 200, {
+      orders: result,
+      total,
+      page: Math.floor(skip / limit) + 1,
+      totalPages: Math.ceil(total / limit) || 1,
+      hasMore: skip + result.length < total,
+      openCount,
     });
-    return json(res, 200, { orders: result, hasMore: result.length === limit, openCount: await orders.countOpen() });
   }
 
   // Hiding an order from the active admin queue preserves customer history, invoices and audit data.
@@ -1125,7 +1137,15 @@ async function api(req, res, url) {
 
   if (path === '/api/admin/products' && method === 'GET') {
     await authUser(req, true);
-    const result = await products.list({ limit: 200, includeInactive: true });
+    const search = cleanText(url.searchParams.get('search') || '', 100);
+    const categorySlug = cleanText(url.searchParams.get('category') || '', 60);
+    const requestedStatus = url.searchParams.get('status') || 'all';
+    const adminStatus = ['listed', 'unavailable', 'deleted'].includes(requestedStatus) ? requestedStatus : 'all';
+    const rawLimit = Number(url.searchParams.get('limit'));
+    const rawPage = Number(url.searchParams.get('page'));
+    const limit = Number.isSafeInteger(rawLimit) ? Math.min(100, Math.max(1, rawLimit)) : 10;
+    const page = Number.isSafeInteger(rawPage) ? Math.max(1, Math.min(1_000_000, rawPage)) : 1;
+    const result = await products.list({ limit, page, includeInactive: true, adminStatus, search: search || undefined, categorySlug: categorySlug || undefined });
     return json(res, 200, result);
   }
 

@@ -90,8 +90,13 @@
               <option value="active">Active orders</option><option value="deleted">Deleted orders</option>
             </select>
           </div>
+          <div class="admin-list-summary"><span id="adminOrderCount">Loading orders…</span><span>Newest orders first</span></div>
           <div id="adminOrders" class="admin-order-list" aria-live="polite"></div>
-          <div class="products-load-more"><button id="loadMoreAdminOrders" class="btn btn-subtle" type="button" hidden>Load more orders</button></div>
+          <nav class="admin-pagination" id="adminOrdersPagination" aria-label="Order pages">
+            <button class="btn btn-subtle" id="previousAdminOrders" type="button">← Previous</button>
+            <span id="adminOrdersPageInfo" aria-live="polite">Page 1 of 1</span>
+            <button class="btn btn-subtle" id="nextAdminOrders" type="button">Next →</button>
+          </nav>
         </section>
 
         <section id="panel-email" class="admin-panel" aria-labelledby="emailHeading">
@@ -113,9 +118,12 @@
               <div><h3>Product catalog</h3><p id="productCount">Loading products…</p></div>
               <div class="admin-table-filters">
                 <label class="admin-search"><span>⌕</span><input id="productSearch" type="search" placeholder="Search name, description or category" aria-label="Search products"></label>
+                <select class="form-control toolbar-select" id="productCategoryFilter" aria-label="Filter products by category"><option value="all">All categories</option></select>
+                <select class="form-control toolbar-select" id="productStatusFilter" aria-label="Filter products by availability"><option value="all">All products</option><option value="listed">Listed</option><option value="unavailable">Unavailable</option><option value="deleted">Deleted</option></select>
               </div>
             </div>
             <div class="admin-table-scroll"><table class="admin-data-table product-data-table"><thead><tr><th>Name</th><th>Description</th><th>Category</th><th>Price</th><th>Photo</th><th>Availability</th><th>Date</th><th>Status</th><th>Actions</th></tr></thead><tbody id="adminProducts" aria-live="polite"></tbody></table></div>
+            <nav class="admin-pagination admin-table-pagination" id="adminProductsPagination" aria-label="Product pages"><button class="btn btn-subtle" id="previousAdminProducts" type="button">← Previous</button><span id="adminProductsPageInfo" aria-live="polite">Page 1 of 1</span><button class="btn btn-subtle" id="nextAdminProducts" type="button">Next →</button></nav>
           </section>
         </section>
 
@@ -126,8 +134,9 @@
           </div>
           <p id="categoryUploadConfigNotice" class="product-upload-config-notice" hidden role="status"></p>
           <section class="admin-card admin-table-card">
-            <div class="admin-table-toolbar"><div><h3>Category list</h3><p id="categoryCount">Loading categories…</p></div><label class="admin-search category-search"><span>⌕</span><input id="categorySearch" type="search" placeholder="Search categories" aria-label="Search categories"></label></div>
+            <div class="admin-table-toolbar"><div><h3>Category list</h3><p id="categoryCount">Loading categories…</p></div><div class="admin-table-filters"><label class="admin-search category-search"><span>⌕</span><input id="categorySearch" type="search" placeholder="Search categories" aria-label="Search categories"></label><select class="form-control toolbar-select" id="categoryStatusFilter" aria-label="Filter categories by status"><option value="all">All categories</option><option value="active">Active</option><option value="deleted">Deleted</option></select></div></div>
             <div class="admin-table-scroll"><table class="admin-data-table category-data-table"><thead><tr><th>Image</th><th>Name</th><th>Description</th><th>Products</th><th>Status</th><th>Actions</th></tr></thead><tbody id="adminCategories" aria-live="polite"></tbody></table></div>
+            <nav class="admin-pagination admin-table-pagination" id="adminCategoriesPagination" aria-label="Category pages"><button class="btn btn-subtle" id="previousAdminCategories" type="button">← Previous</button><span id="adminCategoriesPageInfo" aria-live="polite">Page 1 of 1</span><button class="btn btn-subtle" id="nextAdminCategories" type="button">Next →</button></nav>
           </section>
         </section>
 
@@ -233,6 +242,12 @@
       <input id="categoryImagePublicId" type="hidden" name="imagePublicId" value="">
       <div class="admin-dialog-actions"><button class="btn btn-subtle" type="button" data-close-dialog>Cancel</button><button class="btn btn-primary" type="submit" id="saveCategoryButton">Add category <span>→</span></button></div>
     </form>
+  </dialog>
+  <dialog id="adminOrderDetailDialog" class="admin-order-dialog" aria-labelledby="adminOrderDialogTitle">
+    <div class="admin-order-dialog-shell">
+      <div class="admin-order-dialog-heading"><div><span class="section-label">ORDER MANAGEMENT</span><h2 id="adminOrderDialogTitle">Order details</h2></div><button class="admin-dialog-close" type="button" data-close-dialog aria-label="Close order details">×</button></div>
+      <div id="adminOrderDetailContent"></div>
+    </div>
   </dialog>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 </body>
