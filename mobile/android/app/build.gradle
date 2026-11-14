@@ -6,14 +6,24 @@ plugins {
 }
 
 def signingPropertiesFile = rootProject.file("key.properties")
+if (!signingPropertiesFile.exists()) {
+    signingPropertiesFile = rootProject.file("../../honest-release-signing-files/key.properties")
+}
 def signingProperties = new Properties()
 if (signingPropertiesFile.exists()) {
     signingPropertiesFile.withInputStream { signingProperties.load(it) }
 }
+def signingStoreFilePath = signingProperties.getProperty("storeFile", "").trim()
+def signingStoreFile = signingStoreFilePath ? rootProject.file(signingStoreFilePath) : null
+def signingRequiredProperties = ["keyAlias", "keyPassword", "storePassword", "storeFile"]
+def releaseSigningReady = signingPropertiesFile.exists()
+    && signingRequiredProperties.every { signingProperties.getProperty(it, "").trim() }
+    && signingStoreFile != null
+    && signingStoreFile.isFile()
 
 android {
     namespace = "com.iwacumall.app"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -31,7 +41,7 @@ android {
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
-        targetSdk = flutter.targetSdkVersion
+        targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
@@ -42,11 +52,11 @@ android {
 
     signingConfigs {
         release {
-            if (signingPropertiesFile.exists()) {
-                keyAlias = signingProperties['keyAlias']
-                keyPassword = signingProperties['keyPassword']
-                storeFile = rootProject.file(signingProperties['storeFile'])
-                storePassword = signingProperties['storePassword']
+            if (releaseSigningReady) {
+                keyAlias = signingProperties.getProperty("keyAlias")
+                keyPassword = signingProperties.getProperty("keyPassword")
+                storeFile = signingStoreFile
+                storePassword = signingProperties.getProperty("storePassword")
             }
         }
     }
@@ -62,8 +72,8 @@ tasks.configureEach {
     def taskName = name.toLowerCase()
     if ((taskName.startsWith('assemble') || taskName.startsWith('bundle')) && taskName.contains('release')) {
         doFirst {
-            if (!signingPropertiesFile.exists()) {
-                throw new GradleException('Release signing is not configured. Create the ignored android/key.properties file first.')
+            if (!releaseSigningReady) {
+                throw new GradleException('Release signing is not configured. Provide a valid ignored key.properties file and keystore; keep both out of version control.')
             }
         }
     }

@@ -23,6 +23,7 @@ const navy = Color(0xFF081F62);
 const gold = Color(0xFFFFC400);
 const canvasColor = Color(0xFFF6F8FC);
 const invoicePlatform = MethodChannel('com.iwacumall.app/invoice');
+const webLinksPlatform = MethodChannel('com.iwacumall.app/web');
 
 String money(dynamic amount) {
   final text = (amount is num ? amount.toInt() : int.tryParse('$amount') ?? 0)
@@ -378,6 +379,14 @@ class ShopState extends ChangeNotifier {
     if (_googleSignInInitialized) {
       try { await GoogleSignIn.instance.signOut(); } catch (_) {}
     }
+    notifyListeners();
+  }
+
+  Future<void> clearAfterAccountDeletion() async {
+    await signOut();
+    cart.clear();
+    await prefs.remove('cart');
+    _clearPendingCheckoutKey();
     notifyListeners();
   }
 
@@ -1525,6 +1534,14 @@ class _AccountPageState extends State<AccountPage> {
   bool sessionsLoading = false;
   bool sessionsLoaded = false;
 
+  Future<void> openPrivacyPage(String path) async {
+    try {
+      await webLinksPlatform.invokeMethod<void>('openUrl', {'url': 'https://iwacumall.com$path'});
+    } catch (error) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not open the page: $error')));
+    }
+  }
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -1657,7 +1674,7 @@ class _AccountPageState extends State<AccountPage> {
     final data = await showDialog<Map<String, String>>(context: context, builder: (dialogContext) => AlertDialog(
       title: const Text('Delete your account?'),
       content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
-        const Text('Your profile and saved addresses will be anonymized. Order records may be retained for store records.'),
+        const Text('Your profile, saved addresses, sessions, and sign-in details will be removed. Contact details for an order still being handled may be kept until delivery, payment, and its return period are complete, then erased.'),
         const SizedBox(height: 14),
         TextField(controller: confirmation, autocorrect: false, decoration: const InputDecoration(labelText: 'Type DELETE to confirm')),
         if (!isGoogle) TextField(controller: password, obscureText: true, decoration: const InputDecoration(labelText: 'Current password')),
@@ -1684,7 +1701,7 @@ class _AccountPageState extends State<AccountPage> {
         if (isGoogle) 'idToken': idToken,
         if (!isGoogle) 'password': data['password'],
       });
-      await model.signOut();
+      await model.clearAfterAccountDeletion();
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Your account was deleted.')));
     } catch (error) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
@@ -1806,6 +1823,19 @@ class _AccountPageState extends State<AccountPage> {
       const SizedBox(height: 8),
       Text(model.user?['email'] ?? 'Your home of everything', textAlign: TextAlign.center, style: const TextStyle(color: Colors.blueGrey)),
       const SizedBox(height: 16),
+      Wrap(alignment: WrapAlignment.center, spacing: 4, children: [
+        TextButton.icon(
+          onPressed: () => openPrivacyPage('/privacy'),
+          icon: const Icon(Icons.privacy_tip_outlined, size: 18),
+          label: const Text('Privacy Policy'),
+        ),
+        TextButton.icon(
+          onPressed: () => openPrivacyPage('/delete-account'),
+          icon: const Icon(Icons.delete_outline, size: 18),
+          label: const Text('Account deletion help'),
+        ),
+      ]),
+      const SizedBox(height: 8),
       if (!model.signedIn)
         FilledButton(onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const LoginPage())), child: const Text('Sign in / Register'))
       else ...[
@@ -1868,7 +1898,7 @@ class _AccountPageState extends State<AccountPage> {
           const SizedBox(height: 22),
           const Text('Delete account', style: TextStyle(fontSize: 17, color: Color(0xFF9D302C), fontWeight: FontWeight.w900)),
           const SizedBox(height: 4),
-          const Text('Your personal profile and saved addresses will be anonymized. This cannot be undone.', style: TextStyle(color: Colors.blueGrey, fontSize: 12)),
+          const Text('Your profile and sign-in details will be removed. Contact details for orders still being handled may be kept until the transaction and return period are complete, then erased.', style: TextStyle(color: Colors.blueGrey, fontSize: 12)),
           Align(alignment: Alignment.centerLeft, child: TextButton.icon(onPressed: deleteAccount, icon: const Icon(Icons.delete_forever_outlined, color: Colors.redAccent), label: const Text('Delete my account', style: TextStyle(color: Colors.redAccent)))),
         ],
       ],

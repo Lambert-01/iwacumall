@@ -2,6 +2,7 @@ package com.iwacumall.app
 
 import android.content.ClipData
 import android.content.Intent
+import android.net.Uri
 import androidx.core.content.FileProvider
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.android.FlutterActivity
@@ -11,6 +12,24 @@ import java.io.File
 class MainActivity: FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.iwacumall.app/web")
+            .setMethodCallHandler { call, result ->
+                if (call.method != "openUrl") {
+                    result.notImplemented()
+                    return@setMethodCallHandler
+                }
+                try {
+                    val rawUrl = call.argument<String>("url") ?: throw IllegalArgumentException("A page URL is required.")
+                    val uri = Uri.parse(rawUrl)
+                    require(uri.scheme == "https" && uri.host == "iwacumall.com" && uri.path in setOf("/privacy", "/delete-account")) {
+                        "Only official IwacuMall privacy pages can be opened."
+                    }
+                    startActivity(Intent(Intent.ACTION_VIEW, uri))
+                    result.success(true)
+                } catch (error: Exception) {
+                    result.error("WEB_PAGE_OPEN_FAILED", error.message ?: "Could not open the page.", null)
+                }
+            }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.iwacumall.app/invoice")
             .setMethodCallHandler { call, result ->
                 if (call.method != "openPdf") {

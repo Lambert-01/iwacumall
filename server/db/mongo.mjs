@@ -156,6 +156,8 @@ async function ensureIndexes(db) {
     { key: { createdAt:    -1 },                name: 'orders_created_at' },
     { key: { paymentDeadline: 1 },              name: 'orders_payment_deadline', sparse: true },
     { key: { 'refunds.paymentRef': 1 },          name: 'orders_refund_reference_unique', unique: true, sparse: true },
+    { key: { privacyDeletionPending: 1, privacyDeletionRequestedAt: 1 }, name: 'orders_privacy_cleanup', partialFilterExpression: { privacyDeletionPending: true } },
+    { key: { privacyRecordRetentionUntil: 1 }, name: 'orders_privacy_record_retention', partialFilterExpression: { privacyDataErasedAt: { $exists: true } } },
   ]);
 
   // 7. idempotencyKeys: Durable checkout idempotency

@@ -11,6 +11,7 @@ mobile/android/local.properties
 mobile/android/key.properties
 mobile/android/*.jks
 mobile/android/*.keystore
+honest-release-signing-files/
 mobile/ios/Pods/
 .DS_Store
 *.log

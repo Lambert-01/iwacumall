@@ -54,6 +54,87 @@ function newInvoiceNumber() {
   return `INV-${date}-${suffix}`;
 }
 
+function canEraseDeletedOrderContact(order, now = new Date()) {
+  const activeReturn = (order.returnRequests || []).some(request => ['REQUESTED', 'APPROVED'].includes(request.status));
+  if (activeReturn) return false;
+
+  if (order.fulfillmentStatus === 'CANCELLED') {
+    if (['VOID', 'EXPIRED'].includes(order.paymentStatus)) return true;
+    if (order.paymentStatus === 'PAID') {
+      return order.refundStatus === 'FULLY_REFUNDED' || Number(order.refundedAmount || 0) >= Number(order.total || 0);
+    }
+    return false;
+  }
+
+  if (order.fulfillmentStatus !== 'DELIVERED' || order.paymentStatus !== 'PAID') return false;
+  const deliveredAt = order.deliveredAt || order.updatedAt || order.createdAt;
+  const deliveredTime = new Date(deliveredAt).getTime();
+  if (!Number.isFinite(deliveredTime)) return false;
+  const returnDays = Math.max(0, Number(order.returnWindowDays) || 0);
+  return now.getTime() >= deliveredTime + returnDays * 24 * 60 * 60 * 1000;
+}
+
+async function eraseDeletedOrderContact(db, order, now, session) {
+  const orderDate = new Date(order.createdAt || now);
+  const fiscalYear = Number.isFinite(orderDate.getTime()) ? orderDate.getUTCFullYear() : now.getUTCFullYear();
+  // Rwanda's default calendar fiscal year: keep applicable accounting records
+  // through the ten-year period that starts on the following 1 January.
+  const recordRetentionUntil = new Date(Date.UTC(fiscalYear + 11, 0, 1));
+  const returnRequests = (order.returnRequests || []).map(request => ({
+    id: request.id,
+    status: request.status,
+    items: request.items || [],
+    requestedAt: request.requestedAt,
+    deadline: request.deadline,
+    reviewedAt: request.reviewedAt,
+    reviewedBy: request.reviewedBy,
+    receivedAt: request.receivedAt,
+    receivedBy: request.receivedBy,
+  }));
+  const refunds = (order.refunds || []).map(refund => ({
+    id: refund.id,
+    amount: refund.amount,
+    adminId: refund.adminId,
+    createdAt: refund.createdAt,
+  }));
+
+  await db.collection('orders').updateOne({ id: order.id, privacyDeletionPending: true }, {
+    $set: {
+      customerName: '[deleted]', customerEmail: '', phone: '', address: '', city: '', note: '',
+      paymentRef: null, paymentNote: '', cancelReason: '', returnRequests, refunds,
+      privacyDataErasedAt: now, privacyRecordRetentionUntil: recordRetentionUntil,
+    },
+    $unset: { privacyDeletionPending: '', privacyDeletionRequestedAt: '' },
+  }, { session });
+
+  await db.collection('auditLog').updateMany({ orderId: order.id }, {
+    $set: { detail: 'Customer data erased following account deletion.' },
+    $unset: { userId: '' },
+  }, { session });
+
+  const jobs = await db.collection('emailOutbox').find({ orderId: order.id }, { session }).toArray();
+  for (const job of jobs) {
+    const storeRecipients = (job.recipients || [])
+      .filter(recipient => recipient.kind === 'STORE')
+      .map(recipient => ({ ...recipient, lastError: null }));
+    const eventSnapshot = job.eventSnapshot ? {
+      ...job.eventSnapshot,
+      customerName: '[deleted]', customerEmail: '', phone: '', address: '', city: '', detail: '',
+    } : job.eventSnapshot;
+    await db.collection('emailOutbox').updateOne({ id: job.id }, {
+      $set: {
+        recipients: storeRecipients,
+        ...(eventSnapshot ? { eventSnapshot } : {}),
+        ...(storeRecipients.length === 0 && ['PENDING', 'RETRY', 'FAILED', 'SENDING'].includes(job.status)
+          ? { status: 'CANCELLED', cancelledAt: now }
+          : {}),
+        updatedAt: now,
+      },
+      $unset: { pdfBuffer: '', encryptedAuthToken: '', leaseUntil: '', leaseToken: '' },
+    }, { session });
+  }
+}
+
 export function slugify(value) {
   return String(value).toLowerCase().normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -266,21 +347,37 @@ export const users = {
     await col('users').updateOne({ id: userId }, { $set: { savedAddresses: remaining, updatedAt: new Date() } });
     return { removed: !!removed, addresses: remaining };
   },
-  async anonymize(userId) {
-    // Replace PII with anonymised values; retain id/role/timestamps for legal
-    const anon = `deleted-${userId.slice(0,8)}@removed.invalid`;
-    return col('users').updateOne({ id: userId }, {
-      $set: {
-        name:          '[deleted]',
-        email:         anon,
-        passwordHash:  'deleted',
-        emailVerified: false,
-        emailToken:    null,
-        resetToken:    null,
-        deletedAt:     new Date(),
-      },
-      $unset: { googleSub: '', savedAddresses: '' },
-    });
+  async deleteAccountData(userId) {
+    // Remove the account and its credentials, detach orders, and erase
+    // completed order contact data once fulfillment/return handling is over.
+    const db = getDb();
+    const session = getClient().startSession();
+    const now = new Date();
+    try {
+      let result;
+      await session.withTransaction(async () => {
+        const ownedOrders = await db.collection('orders').find({ userId }, { projection: { id: 1 }, session }).toArray();
+        await db.collection('orders').updateMany({ userId }, {
+          $set: { userId: null, privacyDeletionPending: true, privacyDeletionRequestedAt: now },
+        }, { session });
+        await db.collection('sessions').deleteMany({ userId }, { session });
+        await db.collection('authTokens').deleteMany({ userId }, { session });
+        await db.collection('idempotencyKeys').deleteMany({ userId }, { session });
+        await db.collection('emailOutbox').deleteMany({ userId }, { session });
+        await db.collection('auditLog').updateMany({ userId }, { $unset: { userId: '' } }, { session });
+        result = await db.collection('users').deleteOne({ id: userId }, { session });
+
+        for (const { id } of ownedOrders) {
+          const order = await db.collection('orders').findOne({ id, privacyDeletionPending: true }, { session });
+          if (order && canEraseDeletedOrderContact(order, now)) {
+            await eraseDeletedOrderContact(db, order, now, session);
+          }
+        }
+      });
+      return result;
+    } finally {
+      await session.endSession();
+    }
   },
   /** Count of active customers — used by admin stats. */
   async countCustomers() {
@@ -502,6 +599,57 @@ function adminOrderQuery({ status, paymentStatus, search, includeArchived = fals
 }
 
 export const orders = {
+  async eraseEligibleDeletedCustomerData() {
+    const db = getDb();
+    const now = new Date();
+    const candidates = await db.collection('orders').find({ privacyDeletionPending: true }).limit(500).toArray();
+    let erased = 0;
+    for (const candidate of candidates) {
+      if (!canEraseDeletedOrderContact(candidate, now)) continue;
+      const session = getClient().startSession();
+      let wasErased = false;
+      try {
+        await session.withTransaction(async () => {
+          const order = await db.collection('orders').findOne({ id: candidate.id, privacyDeletionPending: true }, { session });
+          if (!order || !canEraseDeletedOrderContact(order, now)) return;
+          await eraseDeletedOrderContact(db, order, now, session);
+          wasErased = true;
+        });
+      } finally {
+        await session.endSession();
+      }
+      if (wasErased) erased++;
+    }
+
+    const expiredRecords = await db.collection('orders').find({
+      privacyDataErasedAt: { $exists: true },
+      privacyRecordRetentionUntil: { $lte: now },
+    }, { projection: { id: 1 } }).limit(500).toArray();
+    let purged = 0;
+    for (const candidate of expiredRecords) {
+      const session = getClient().startSession();
+      let wasPurged = false;
+      try {
+        await session.withTransaction(async () => {
+          const expiredOrder = await db.collection('orders').findOne({
+            id: candidate.id,
+            privacyDataErasedAt: { $exists: true },
+            privacyRecordRetentionUntil: { $lte: now },
+          }, { session });
+          if (!expiredOrder) return;
+          await db.collection('emailOutbox').deleteMany({ orderId: expiredOrder.id }, { session });
+          await db.collection('auditLog').deleteMany({ orderId: expiredOrder.id }, { session });
+          await db.collection('orders').deleteOne({ id: expiredOrder.id }, { session });
+          wasPurged = true;
+        });
+      } finally {
+        await session.endSession();
+      }
+      if (wasPurged) purged++;
+    }
+    return { erased, purged };
+  },
+
   /**
    * Create an order using a MongoDB transaction (requires replica set / Atlas).
    * Falls back to a sequential write if the driver is connected to standalone Mongo.
@@ -519,6 +667,9 @@ export const orders = {
     let outcome;
     try {
       outcome = await session.withTransaction(async () => {
+        const activeCustomer = await db.collection('users').findOne({ id: userId, role: 'CUSTOMER' }, { session });
+        if (!activeCustomer) throw Object.assign(new Error('This account is no longer available. Sign in again to continue.'), { status: 401 });
+
         if (idempotencyKey) {
           const existing = await db.collection('idempotencyKeys').findOne(
             { userId, key: idempotencyKey }, { session }

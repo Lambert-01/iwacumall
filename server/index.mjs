@@ -632,8 +632,7 @@ async function api(req, res, url) {
       const full = await users.findByEmail(user.email);
       ensure(verifyPassword(password, full?.passwordHash), 401, 'Password is incorrect');
     }
-    await sessions.deleteAllForUser(user.id);
-    await users.anonymize(user.id);
+    await users.deleteAccountData(user.id);
     clearSessionCookie(res);
     return json(res, 200, { ok: true });
   }
@@ -1609,6 +1608,7 @@ async function serveStatic(req, res, url) {
   if (urlPath === '/account')                      urlPath = '/account.html';
   if (urlPath === '/reset-password')               urlPath = '/reset-password.html';
   if (urlPath === '/privacy')                      urlPath = '/privacy.html';
+  if (urlPath === '/delete-account')               urlPath = '/delete-account.html';
   if (urlPath === '/terms')                        urlPath = '/terms.html';
   if (urlPath === '/delivery-policy')              urlPath = '/delivery-policy.html';
   if (urlPath.startsWith('/categories/'))          urlPath = '/index.html';
@@ -1699,6 +1699,12 @@ if (!config.isTest) {
       if (count) console.info(`[orders] Expired ${count} overdue invoice(s) and restored reserved stock.`);
     } catch (err) {
       console.warn('[orders] Invoice expiry sweep failed:', err?.message || 'unknown');
+    }
+    try {
+      const { erased, purged } = await orders.eraseEligibleDeletedCustomerData();
+      if (erased || purged) console.info(`[privacy] Cleaned deleted-account order data: ${erased} contact record(s) erased, ${purged} expired record(s) purged.`);
+    } catch (err) {
+      console.warn('[privacy] Deleted-account data cleanup failed:', err?.message || 'unknown');
     }
   };
   await sweepExpiredInvoices();
