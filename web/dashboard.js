@@ -66,11 +66,14 @@ async function loadStats() {
 // ─── Orders ───────────────────────────────────────────────────────────────────
 
 let adminOrders = [];
-let adminOrdersSkip = 0;
 let adminOrdersHasMore = false;
 let adminOrdersLoading = false;
-let adminOrdersReloadQueued = false;
+let adminOrdersQueuedPage = null;
 let adminOrdersOpenCount = 0;
+let adminOrdersPage = 1;
+let adminOrdersTotal = 0;
+const adminOrdersPageSize = 10;
+let adminOrderDetailId = '';
 
 const fulfillmentNext = {
   PLACED:['CONFIRMED'], CONFIRMED:['PACKING'],
@@ -78,120 +81,92 @@ const fulfillmentNext = {
   DELIVERED:[], CANCELLED:[],
 };
 
+function renderAdminOrderDetail(order) {
+  const fStatus = order.fulfillmentStatus || order.status || 'PLACED';
+  const pStatus = order.paymentStatus || 'PENDING';
+  const refundTotal = Number(order.refundedAmount || 0);
+  const refundRemaining = Math.max(0, Number(order.total || 0) - refundTotal);
+  const transitions = fulfillmentNext[fStatus] || [];
+  const orderItems = (order.items || []).map(item => `${esc(item.productName || item.product_name)} × ${Number(item.quantity)}`).join(' · ');
+  const itemCount = (order.items || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0);
+  const snap = order.paymentMethodSnapshot || {};
+  const methodLabel = snap.label || order.paymentMethodLabel || 'Unknown';
+  const isArchived = Boolean(order.adminArchivedAt);
+  const paymentControls = isArchived ? '' : pStatus === 'PENDING' ? `
+    <details class="confirm-payment-details">
+      <summary>Confirm payment received</summary>
+      <form class="confirm-payment-form" data-order-id="${esc(order.id)}">
+        <label>Payment reference<input class="form-control" name="paymentRef" placeholder="Reference from the payment proof" required minlength="2"></label>
+        <input class="form-control" name="note" placeholder="Optional internal note">
+        <button class="action-btn" type="submit">Confirm payment received</button>
+      </form>
+    </details>` : (pStatus === 'PAID' ? `<div class="order-payment-success">✓ Payment confirmed</div>${refundTotal ? `<div class="order-refund-note">Refunded ${fmt(refundTotal)} · ${esc(order.refundStatus || 'PARTIAL')}</div>` : ''}` : `<div class="order-payment-muted">Payment: ${esc(pStatus)}</div>`);
+  const refundControls = !isArchived && pStatus === 'PAID' && refundRemaining > 0
+    ? `<button class="action-btn danger-btn" data-refund-order="${esc(order.id)}" data-refund-remaining="${refundRemaining}">Record refund · up to ${fmt(refundRemaining)}</button>` : '';
+  const nextAction = isArchived
+    ? `<button class="action-btn" data-restore-order="${esc(order.id)}">Restore order</button>`
+    : fStatus === 'PLACED'
+      ? `<button class="action-btn order-primary-action" data-confirm-order="${esc(order.id)}">✓ Confirm order</button><small class="order-confirm-separation">Payment is confirmed separately.</small>`
+      : pStatus !== 'PAID' && fStatus !== 'CANCELLED'
+        ? `<div class="order-action-hint">Confirm payment before packing and delivery can continue.</div>`
+        : (transitions.length ? `<div class="admin-order-controls"><select class="form-control" data-order-select="${esc(order.id)}" aria-label="Next status">${transitions.map(next => `<option value="${next}">${next.replaceAll('_',' ')}</option>`).join('')}</select><button class="action-btn" data-update-status="${esc(order.id)}">Update status</button></div>` : '');
+  const cancelBtn = !isArchived && !['CANCELLED','DELIVERED'].includes(fStatus) && pStatus !== 'PAID'
+    ? `<button class="action-btn danger-btn" data-cancel-order="${esc(order.id)}">✕ Cancel order</button>` : '';
+  const archiveAction = !isArchived ? `<button class="action-btn danger-btn" data-archive-order="${esc(order.id)}">Delete from order list</button>` : '';
+  const returnRequests = (order.returnRequests || []).map(request => {
+    const items = (request.items || []).map(item => `<li>${esc(item.productName)} × ${Number(item.quantity)}${request.status === 'RECEIVED' ? ` · received ${Number(item.returnedQuantity || 0)}` : ''}</li>`).join('');
+    const review = request.status === 'REQUESTED' ? `<div class="admin-return-actions"><form class="return-review-form" data-order-id="${esc(order.id)}" data-request-id="${esc(request.id)}" data-decision="APPROVED"><textarea class="form-control" name="reviewNote" maxlength="300" placeholder="Optional customer-facing note"></textarea><button class="action-btn" type="submit">Approve return</button></form><form class="return-review-form" data-order-id="${esc(order.id)}" data-request-id="${esc(request.id)}" data-decision="REJECTED"><textarea class="form-control" name="reviewNote" maxlength="300" placeholder="Explain why you cannot accept this return" required minlength="5"></textarea><button class="action-btn danger-btn" type="submit">Reject return</button></form></div>` : '';
+    const receive = request.status === 'APPROVED' ? `<form class="return-receive-form" data-order-id="${esc(order.id)}" data-request-id="${esc(request.id)}"><strong>Inspect returned goods</strong>${(request.items || []).map(item => `<div class="return-receive-item"><span>${esc(item.productName)} · approved ${Number(item.quantity)}</span><label>Received<input class="form-control" type="number" data-return-received="${esc(item.productId)}" min="0" max="${Number(item.quantity)}" value="0" required></label></div>`).join('')}<textarea class="form-control" name="note" maxlength="300" placeholder="Inspection note (optional)"></textarea><button class="action-btn" type="submit">Mark inspection complete</button></form>` : '';
+    return `<section class="admin-return-request"><strong>Return ${esc(String(request.status || 'REQUESTED').replaceAll('_',' '))}</strong><small>${esc(formatDate(request.requestedAt))} · ${esc(request.reason)}</small><ul>${items}</ul>${request.reviewNote ? `<p>${esc(request.reviewNote)}</p>` : ''}${review}${receive}</section>`;
+  }).join('');
+  return `<article class="admin-order-card">
+    <div class="admin-order-head"><div><div class="admin-order-id">${esc(order.invoiceNumber || order.id.slice(0,8).toUpperCase())}<span class="pill ${esc(fStatus)}">${esc(fStatus.replaceAll('_',' '))}</span><span class="pill payment-pill ${esc(pStatus)}">${esc(pStatus)}</span></div><div class="admin-order-time">${esc(formatDate(order.createdAt || order.created_at))}</div></div><div><div class="admin-order-customer">${esc(order.customerName || order.customer_name)}</div><div class="admin-order-contact"><a href="tel:${esc(order.phone)}">${esc(order.phone)}</a> · ${esc(order.city)}<br>${esc(order.address)}</div></div><div class="admin-order-total">${fmt(order.total)}</div></div>
+    <div class="admin-order-detail-grid"><section><h3>Items <span>${itemCount}</span></h3><p class="admin-order-items">${orderItems || 'No items'}</p><p class="admin-order-method">Payment method · <strong>${esc(methodLabel)}</strong></p>${returnRequests ? `<div class="admin-return-list">${returnRequests}</div>` : ''}</section><section class="admin-order-detail-actions">${isArchived ? '<div class="archived-order-note">Hidden from the active queue. Invoice and history are retained.</div>' : paymentControls}${refundControls}${nextAction}${cancelBtn}<a class="action-btn" href="/invoice?order=${esc(order.id)}" target="_blank">🖨 View invoice</a><a class="action-btn" href="/api/orders/${esc(order.id)}/invoice.pdf" target="_blank">📥 Download PDF</a><button class="action-btn" data-view-audit="${esc(order.id)}">📋 Audit log</button>${archiveAction}</section></div>
+  </article>`;
+}
+
 function renderAdminOrders() {
-  const query  = ($('#orderSearch')?.value || '').trim().toLowerCase();
-  const status = $('#orderStatusFilter')?.value || 'all';
-  const pStatus= $('#orderPaymentFilter')?.value || 'all';
-  const filtered = adminOrders.filter((order) => {
-    const matchF = status  === 'all' || order.fulfillmentStatus === status;
-    const matchP = pStatus === 'all' || order.paymentStatus    === pStatus;
-    const searchText = [order.id,order.customerName||order.customer_name,order.phone,order.city,order.invoiceNumber].join(' ').toLowerCase();
-    return matchF && matchP && (!query || searchText.includes(query));
-  });
   const count = $('#sidebarOrderCount');
   if (count) count.textContent = adminOrdersOpenCount || '';
-  if (!filtered.length) {
-    $('#adminOrders').innerHTML = `<div class="empty-state">${adminOrders.length ? 'No orders match those filters.' : 'No orders yet.'}</div>`;
-    return;
-  }
-  $('#adminOrders').innerHTML = filtered.map((order) => {
-    const fStatus = order.fulfillmentStatus || order.status || 'PLACED';
-    const pStatus = order.paymentStatus || 'PENDING';
-    const refundTotal = Number(order.refundedAmount || 0);
-    const refundRemaining = Math.max(0, Number(order.total || 0) - refundTotal);
-    const transitions = fulfillmentNext[fStatus] || [];
-    const orderItems  = (order.items || []).map(item => `${esc(item.productName||item.product_name)} × ${Number(item.quantity)}`).join(' · ');
-    const snap = order.paymentMethodSnapshot || {};
-    const methodLabel = snap.label || order.paymentMethodLabel || 'Unknown';
-    const isArchived = Boolean(order.adminArchivedAt);
-
-    // Payment confirmation controls (only for PENDING payment)
-    const paymentControls = isArchived ? '' : pStatus === 'PENDING' ? `
-      <details class="confirm-payment-details">
-        <summary>Confirm payment received</summary>
-        <form class="confirm-payment-form" data-order-id="${esc(order.id)}">
-          <label>Payment reference<input class="form-control" name="paymentRef" placeholder="Reference from the payment proof" required minlength="2"></label>
-          <input class="form-control" name="note" placeholder="Optional internal note">
-          <button class="action-btn" type="submit">Confirm payment received</button>
-        </form>
-      </details>` : (pStatus === 'PAID' ? `<div style="color:#155724;font-size:.85rem">✅ Payment confirmed</div>${refundTotal ? `<div style="color:#815b00;font-size:.82rem">Refunded ${fmt(refundTotal)} · ${esc(order.refundStatus || 'PARTIAL')}</div>` : ''}` : `<div style="color:#721c24;font-size:.85rem">Payment: ${esc(pStatus)}</div>`);
-    const refundControls = !isArchived && pStatus === 'PAID' && refundRemaining > 0
-      ? `<button class="action-btn danger-btn" data-refund-order="${esc(order.id)}" data-refund-remaining="${refundRemaining}" style="margin-top:.5rem">Record refund · up to ${fmt(refundRemaining)}</button>` : '';
-
-    // Fulfillment update controls
-    const nextAction = isArchived
-      ? `<button class="action-btn" data-restore-order="${esc(order.id)}">Restore order</button>`
-      : fStatus === 'PLACED'
-        ? `<button class="action-btn order-primary-action" data-confirm-order="${esc(order.id)}">✓ Confirm order</button><small class="order-confirm-separation">This does not confirm payment.</small>`
-        : pStatus !== 'PAID' && fStatus !== 'CANCELLED'
-          ? `<div class="order-action-hint">Confirm payment before packing and delivery can continue.</div>`
-          : (transitions.length ? `<div class="admin-order-controls"><select class="form-control" data-order-select="${esc(order.id)}" aria-label="Next status">${transitions.map(next=>`<option value="${next}">${next.replaceAll('_',' ')}</option>`).join('')}</select><button class="action-btn" data-update-status="${esc(order.id)}">Update status</button></div>` : '');
-
-    // Cancel button (only for unpaid)
-    const cancelBtn = !isArchived && !['CANCELLED','DELIVERED'].includes(fStatus) && pStatus !== 'PAID'
-      ? `<button class="action-btn danger-btn" data-cancel-order="${esc(order.id)}" style="margin-top:.5rem">✕ Cancel order</button>` : '';
-    const archiveAction = !isArchived
-      ? `<button class="action-btn danger-btn" data-archive-order="${esc(order.id)}">Delete from order list</button>` : '';
-
-    const returnRequests = (order.returnRequests || []).map(request => {
-      const items = (request.items || []).map(item => `<li>${esc(item.productName)} × ${Number(item.quantity)}${request.status === 'RECEIVED' ? ` · received ${Number(item.returnedQuantity || 0)}` : ''}</li>`).join('');
-      const review = request.status === 'REQUESTED' ? `<div class="admin-return-actions"><form class="return-review-form" data-order-id="${esc(order.id)}" data-request-id="${esc(request.id)}" data-decision="APPROVED"><textarea class="form-control" name="reviewNote" maxlength="300" placeholder="Optional customer-facing note"></textarea><button class="action-btn" type="submit">Approve return</button></form><form class="return-review-form" data-order-id="${esc(order.id)}" data-request-id="${esc(request.id)}" data-decision="REJECTED"><textarea class="form-control" name="reviewNote" maxlength="300" placeholder="Explain why you cannot accept this return" required minlength="5"></textarea><button class="action-btn danger-btn" type="submit">Reject return</button></form></div>` : '';
-      const receive = request.status === 'APPROVED' ? `<form class="return-receive-form" data-order-id="${esc(order.id)}" data-request-id="${esc(request.id)}"><strong>Inspect returned goods</strong>${(request.items || []).map(item => `<div class="return-receive-item"><span>${esc(item.productName)} · approved ${Number(item.quantity)}</span><label>Received<input class="form-control" type="number" data-return-received="${esc(item.productId)}" min="0" max="${Number(item.quantity)}" value="0" required></label></div>`).join('')}<textarea class="form-control" name="note" maxlength="300" placeholder="Inspection note (optional)"></textarea><button class="action-btn" type="submit">Mark inspection complete</button></form>` : '';
-      return `<section class="admin-return-request"><strong>Return ${esc(String(request.status || 'REQUESTED').replaceAll('_',' '))}</strong><small>${esc(formatDate(request.requestedAt))} · ${esc(request.reason)}</small><ul>${items}</ul>${request.reviewNote ? `<p>${esc(request.reviewNote)}</p>` : ''}${review}${receive}</section>`;
+  const first = adminOrdersTotal ? (adminOrdersPage - 1) * adminOrdersPageSize + 1 : 0;
+  const last = Math.min(adminOrdersPage * adminOrdersPageSize, adminOrdersTotal);
+  const countText = `${first}–${last} of ${adminOrdersTotal} order${adminOrdersTotal === 1 ? '' : 's'}`;
+  if ($('#adminOrderCount')) $('#adminOrderCount').textContent = countText;
+  if ($('#adminOrdersPageInfo')) $('#adminOrdersPageInfo').textContent = `Page ${adminOrdersPage} of ${Math.ceil(adminOrdersTotal / adminOrdersPageSize) || 1}`;
+  if ($('#previousAdminOrders')) $('#previousAdminOrders').disabled = adminOrdersLoading || adminOrdersPage <= 1;
+  if ($('#nextAdminOrders')) $('#nextAdminOrders').disabled = adminOrdersLoading || last >= adminOrdersTotal;
+  const host = $('#adminOrders');
+  if (!adminOrders.length) {
+    host.innerHTML = `<div class="empty-state">${adminOrdersTotal ? 'No orders match those filters.' : 'No orders yet.'}</div>`;
+  } else {
+    host.innerHTML = adminOrders.map(order => {
+      const fStatus = order.fulfillmentStatus || order.status || 'PLACED';
+      const pStatus = order.paymentStatus || 'PENDING';
+      const itemCount = (order.items || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0);
+      const preview = (order.items || []).slice(0, 2).map(item => `${esc(item.productName || item.product_name)} × ${Number(item.quantity)}`).join(' · ');
+      return `<article class="admin-order-row"><div class="admin-order-row-main"><div class="admin-order-row-ref"><strong>${esc(order.invoiceNumber || order.id.slice(0,8).toUpperCase())}</strong><small>${esc(formatDate(order.createdAt || order.created_at))}</small></div><div class="admin-order-row-customer"><strong>${esc(order.customerName || order.customer_name)}</strong><small>${esc(order.phone || '')} · ${esc(order.city || '')}</small></div><div class="admin-order-row-status"><span class="pill ${esc(fStatus)}">${esc(fStatus.replaceAll('_',' '))}</span><span class="pill payment-pill ${esc(pStatus)}">${esc(pStatus)}</span></div><div class="admin-order-row-total">${fmt(order.total)}<small>${itemCount} item${itemCount === 1 ? '' : 's'}</small></div><button class="action-btn admin-order-view" type="button" data-view-order="${esc(order.id)}">View details <span aria-hidden="true">↗</span></button></div><p class="admin-order-row-items">${preview || 'No items'}${(order.items || []).length > 2 ? ' · and more' : ''}</p></article>`;
     }).join('');
-
-    return `<article class="admin-order-card">
-      <div class="admin-order-head">
-        <div>
-          <div class="admin-order-id">
-            ${esc(order.invoiceNumber || order.id.slice(0,8).toUpperCase())}
-            <span class="pill ${esc(fStatus)}">${esc(fStatus.replaceAll('_',' '))}</span>
-            <span class="pill payment-pill ${esc(pStatus)}" style="font-size:.7rem">${esc(pStatus)}</span>
-          </div>
-          <div class="admin-order-time">${esc(formatDate(order.createdAt || order.created_at))}</div>
-        </div>
-        <div>
-          <div class="admin-order-customer">${esc(order.customerName||order.customer_name)}</div>
-          <div class="admin-order-contact"><a href="tel:${esc(order.phone)}">${esc(order.phone)}</a> · ${esc(order.city)}<br>${esc(order.address)}</div>
-        </div>
-        <div class="admin-order-total">${fmt(order.total)}</div>
-      </div>
-      <div class="admin-order-bottom">
-        <div class="admin-order-items">
-          ${orderItems || 'No items'}
-          <br><strong>Method: ${esc(methodLabel)}</strong>
-          ${returnRequests ? `<div class="admin-return-list">${returnRequests}</div>` : ''}
-        </div>
-        <div>
-          ${isArchived ? '<div class="archived-order-note">This order is hidden from the active queue. Invoice and history are retained.</div>' : paymentControls}
-          ${refundControls}
-          ${nextAction}
-          ${cancelBtn}
-          <a class="action-btn" href="/invoice?order=${esc(order.id)}" target="_blank" style="margin-top:.4rem;display:inline-block">🖨 View invoice</a>
-          <a class="action-btn" href="/api/orders/${esc(order.id)}/invoice.pdf" target="_blank" style="margin-top:.4rem;display:inline-block">📥 Download PDF</a>
-          <button class="action-btn" data-view-audit="${esc(order.id)}" style="margin-top:.4rem">📋 Audit log</button>
-          ${archiveAction}
-        </div>
-      </div>
-    </article>`;
-  }).join('');
+  }
+  const dialog = $('#adminOrderDetailDialog');
+  if (dialog?.open && adminOrderDetailId) {
+    const selected = adminOrders.find(order => order.id === adminOrderDetailId);
+    if (selected) {
+      $('#adminOrderDialogTitle').textContent = `Order ${selected.invoiceNumber || selected.id.slice(0,8).toUpperCase()}`;
+      $('#adminOrderDetailContent').innerHTML = renderAdminOrderDetail(selected);
+    } else {
+      dialog.close();
+      adminOrderDetailId = '';
+    }
+  }
 }
 
-async function loadAdminOrders() {
-  return loadAdminOrdersPage(false);
-}
-
-async function loadAdminOrdersPage(append) {
+async function loadAdminOrders(requestedPage = 1) {
   if (adminOrdersLoading) {
-    if (!append) adminOrdersReloadQueued = true;
+    adminOrdersQueuedPage = requestedPage;
     return;
   }
-  const limit = 100;
-  if (!append) {
-    adminOrdersSkip = 0;
-    adminOrders = [];
-  }
-  const params = new URLSearchParams({ limit:String(limit), skip:String(adminOrdersSkip) });
+  const page = Math.max(1, Number(requestedPage) || 1);
+  const params = new URLSearchParams({ limit:String(adminOrdersPageSize), skip:String((page - 1) * adminOrdersPageSize) });
   const status = $('#orderStatusFilter')?.value || 'all';
   const paymentStatus = $('#orderPaymentFilter')?.value || 'all';
   const includeArchived = $('#orderVisibilityFilter')?.value === 'deleted';
@@ -200,27 +175,29 @@ async function loadAdminOrdersPage(append) {
   if (paymentStatus !== 'all') params.set('paymentStatus', paymentStatus);
   if (includeArchived) params.set('includeArchived', 'true');
   if (search) params.set('search', search);
-  const button = $('#loadMoreAdminOrders');
   adminOrdersLoading = true;
-  if (button) { button.disabled = true; button.textContent = 'Loading…'; }
+  if ($('#previousAdminOrders')) $('#previousAdminOrders').disabled = true;
+  if ($('#nextAdminOrders')) $('#nextAdminOrders').disabled = true;
   try {
     const result = await api(`/admin/orders?${params}`);
-    const rows = result.orders || [];
-    adminOrders = append ? [...adminOrders, ...rows] : rows;
-    adminOrdersSkip += rows.length;
+    if (page > result.totalPages && result.total > 0) {
+      adminOrdersQueuedPage = result.totalPages;
+      return;
+    }
+    adminOrders = result.orders || [];
+    adminOrdersPage = result.page || page;
+    adminOrdersTotal = Number(result.total || 0);
     adminOrdersHasMore = result.hasMore === true;
     adminOrdersOpenCount = Number(result.openCount || 0);
     renderAdminOrders();
   } finally {
     adminOrdersLoading = false;
-    if (button) {
-      button.hidden = !adminOrdersHasMore;
-      button.disabled = false;
-      button.textContent = 'Load more orders';
-    }
-    if (adminOrdersReloadQueued) {
-      adminOrdersReloadQueued = false;
-      void loadAdminOrdersPage(false).catch(error => notify(error.message));
+    const queuedPage = adminOrdersQueuedPage;
+    adminOrdersQueuedPage = null;
+    if (queuedPage !== null) {
+      void loadAdminOrders(queuedPage).catch(error => notify(error.message));
+    } else {
+      renderAdminOrders();
     }
   }
 }
@@ -240,6 +217,13 @@ async function loadEmailOutbox() {
 
 let adminProducts = [];
 let adminCategories = [];
+let adminProductPage = 1;
+let adminProductTotal = 0;
+let adminProductTotalPages = 1;
+let adminProductRequestId = 0;
+let adminCategoryPage = 1;
+const adminProductPageSize = 10;
+const adminCategoryPageSize = 10;
 let productImageUploadsEnabled = false;
 let productImageUploadPromise = Promise.resolve();
 let categoryImageUploadPromise = Promise.resolve();
@@ -254,15 +238,15 @@ function adminImageGallery(product) {
 }
 
 function renderProducts() {
-  const query    = ($('#productSearch')?.value || '').trim().toLowerCase();
-  const products = adminProducts.filter(p => {
-    const matchesText = `${p.name} ${p.description||''} ${p.category||p.categorySlug||''}`.toLowerCase().includes(query);
-    return matchesText;
-  });
+  const products = adminProducts;
   const count = $('#productCount');
-  if (count) count.textContent = `${products.length} ${products.length===1?'product':'products'} shown`;
+  if (count) count.textContent = `${adminProductTotal} ${adminProductTotal===1?'product':'products'} · page ${adminProductPage} of ${adminProductTotalPages}`;
+  if ($('#adminProductsPageInfo')) $('#adminProductsPageInfo').textContent = `Page ${adminProductPage} of ${adminProductTotalPages}`;
+  if ($('#previousAdminProducts')) $('#previousAdminProducts').disabled = adminProductPage <= 1;
+  if ($('#nextAdminProducts')) $('#nextAdminProducts').disabled = adminProductPage >= adminProductTotalPages;
+  if ($('#adminProductsPagination')) $('#adminProductsPagination').hidden = adminProductTotalPages <= 1;
   const tbody = $('#adminProducts');
-  if (!products.length) { tbody.innerHTML = '<tr><td colspan="9"><div class="empty-state">No products match your search.</div></td></tr>'; return; }
+  if (!products.length) { tbody.innerHTML = `<tr><td colspan="9"><div class="empty-state">${adminProductTotal ? 'No products on this page.' : 'No products match these filters.'}</div></td></tr>`; return; }
   tbody.innerHTML = products.map(product => {
     const variants = Array.isArray(product.variants) ? product.variants : [];
     const variantSummary = variants.length
@@ -286,12 +270,31 @@ function renderProducts() {
   }).join('');
 }
 
-async function loadProducts() {
-  const [{products},{categories}] = await Promise.all([api('/admin/products'), api('/admin/categories')]);
+async function loadProducts(requestedPage = adminProductPage) {
+  const requestId = ++adminProductRequestId;
+  const page = Math.max(1, Number(requestedPage) || 1);
+  const params = new URLSearchParams({ limit:String(adminProductPageSize), page:String(page) });
+  const search = ($('#productSearch')?.value || '').trim();
+  const categorySlug = $('#productCategoryFilter')?.value || 'all';
+  const status = $('#productStatusFilter')?.value || 'all';
+  if (search) params.set('search', search);
+  if (categorySlug !== 'all') params.set('category', categorySlug);
+  if (status !== 'all') params.set('status', status);
+  const [{products, total, totalPages, page: resultPage}, {categories}] = await Promise.all([api(`/admin/products?${params}`), api('/admin/categories')]);
+  if (requestId !== adminProductRequestId) return;
+  if (page > totalPages) return loadProducts(totalPages || 1);
   adminProducts = products;
+  adminProductPage = resultPage || page;
+  adminProductTotal = Number(total || 0);
+  adminProductTotalPages = Number(totalPages || 1);
   adminCategories = categories;
   const select = $('#adminCategorySelect');
   if (select) select.innerHTML = categories.filter(c => c.active !== false).map(c => `<option value="${esc(c.slug)}">${esc(c.name)}</option>`).join('');
+  const filter = $('#productCategoryFilter');
+  if (filter) {
+    filter.innerHTML = `<option value="all">All categories</option>${categories.map(c => `<option value="${esc(c.slug)}">${esc(c.name)}${c.active === false ? ' · deleted' : ''}</option>`).join('')}`;
+    filter.value = categorySlug;
+  }
   renderProducts();
 }
 
@@ -507,6 +510,12 @@ async function loadCategories() {
   renderCategories();
   const select = $('#adminCategorySelect');
   if (select) select.innerHTML = categories.filter(c => c.active !== false).map(c => `<option value="${esc(c.slug)}">${esc(c.name)}</option>`).join('');
+  const productFilter = $('#productCategoryFilter');
+  if (productFilter) {
+    const selected = productFilter.value || 'all';
+    productFilter.innerHTML = `<option value="all">All categories</option>${categories.map(c => `<option value="${esc(c.slug)}">${esc(c.name)}${c.active === false ? ' · deleted' : ''}</option>`).join('')}`;
+    productFilter.value = selected;
+  }
   if (!categories.some(category => category.active !== false)) {
     const button = $('#saveProductButton');
     if (button) button.disabled = true;
@@ -518,15 +527,28 @@ async function loadCategories() {
 
 function renderCategories() {
   const query = ($('#categorySearch')?.value || '').trim().toLowerCase();
-  const filtered = adminCategories.filter(category => `${category.name} ${category.description||''}`.toLowerCase().includes(query));
+  const status = $('#categoryStatusFilter')?.value || 'all';
+  const filtered = adminCategories.filter(category => {
+    const matchesText = `${category.name} ${category.description||''}`.toLowerCase().includes(query);
+    const matchesStatus = status === 'all' || (status === 'deleted' ? category.active === false : category.active !== false);
+    return matchesText && matchesStatus;
+  });
+  const pages = Math.ceil(filtered.length / adminCategoryPageSize) || 1;
+  adminCategoryPage = Math.min(adminCategoryPage, pages);
+  const pageStart = (adminCategoryPage - 1) * adminCategoryPageSize;
+  const pageItems = filtered.slice(pageStart, pageStart + adminCategoryPageSize);
   const count = $('#categoryCount');
-  if (count) count.textContent = `${filtered.length} ${filtered.length === 1 ? 'category' : 'categories'} shown`;
+  if (count) count.textContent = `${filtered.length} ${filtered.length === 1 ? 'category' : 'categories'} · page ${adminCategoryPage} of ${pages}`;
+  if ($('#adminCategoriesPageInfo')) $('#adminCategoriesPageInfo').textContent = `Page ${adminCategoryPage} of ${pages}`;
+  if ($('#previousAdminCategories')) $('#previousAdminCategories').disabled = adminCategoryPage <= 1;
+  if ($('#nextAdminCategories')) $('#nextAdminCategories').disabled = adminCategoryPage >= pages;
+  if ($('#adminCategoriesPagination')) $('#adminCategoriesPagination').hidden = pages <= 1;
   const tbody = $('#adminCategories');
   if (!filtered.length) {
     tbody.innerHTML = `<tr><td colspan="6"><div class="empty-state">${adminCategories.length ? 'No categories match your search.' : 'Add your first category to organize the catalog.'}</div></td></tr>`;
     return;
   }
-  tbody.innerHTML = filtered.map(category => {
+  tbody.innerHTML = pageItems.map(category => {
     const image = category.imageUrl ? `<img class="admin-table-photo category-table-photo" src="${esc(category.imageUrl)}" alt="${esc(category.name)}" loading="lazy" onerror="this.src='/assets/products/fallback.png'">` : `<span class="admin-table-photo-placeholder">${categoryIcon(category.slug)}</span>`;
     return `<tr>
       <td>${image}</td>
@@ -708,14 +730,45 @@ document.addEventListener('click', async (event) => {
     if (button.hasAttribute('data-open-product-dialog')) { openProductEditor(); return; }
     if (button.hasAttribute('data-open-category-dialog')) { openCategoryEditor(); return; }
     if (button.hasAttribute('data-close-dialog')) { button.closest('dialog')?.close(); return; }
+    if (button.dataset.viewOrder) {
+      const order = adminOrders.find(item => item.id === button.dataset.viewOrder);
+      if (!order) return;
+      adminOrderDetailId = order.id;
+      $('#adminOrderDialogTitle').textContent = `Order ${order.invoiceNumber || order.id.slice(0,8).toUpperCase()}`;
+      $('#adminOrderDetailContent').innerHTML = renderAdminOrderDetail(order);
+      $('#adminOrderDetailDialog').showModal();
+      return;
+    }
     if (button.dataset.editProduct) { openProductEditor(button.dataset.editProduct); return; }
     if (button.dataset.editCategory) { openCategoryEditor(button.dataset.editCategory); return; }
     if (button.id === 'loadMoreCustomerOrders') {
       await loadCustomerOrders(true);
       return;
     }
-    if (button.id === 'loadMoreAdminOrders') {
-      await loadAdminOrdersPage(true);
+    if (button.id === 'previousAdminOrders') {
+      await loadAdminOrders(adminOrdersPage - 1);
+      return;
+    }
+    if (button.id === 'nextAdminOrders') {
+      await loadAdminOrders(adminOrdersPage + 1);
+      return;
+    }
+    if (button.id === 'previousAdminProducts') {
+      await loadProducts(adminProductPage - 1);
+      return;
+    }
+    if (button.id === 'nextAdminProducts') {
+      await loadProducts(adminProductPage + 1);
+      return;
+    }
+    if (button.id === 'previousAdminCategories') {
+      adminCategoryPage = Math.max(1, adminCategoryPage - 1);
+      renderCategories();
+      return;
+    }
+    if (button.id === 'nextAdminCategories') {
+      adminCategoryPage += 1;
+      renderCategories();
       return;
     }
     if (button.dataset.triggerProductImage) {
@@ -886,13 +939,17 @@ document.addEventListener('click', async (event) => {
 });
 
 let orderSearchTimer = null;
+let productSearchTimer = null;
 document.addEventListener('input', (event) => {
   if (event.target.id === 'orderSearch') {
     clearTimeout(orderSearchTimer);
-    orderSearchTimer = setTimeout(() => { void loadAdminOrders().catch(error => notify(error.message)); }, 300);
+    orderSearchTimer = setTimeout(() => { void loadAdminOrders(1).catch(error => notify(error.message)); }, 300);
   }
-  if (event.target.id === 'productSearch') renderProducts();
-  if (event.target.id === 'categorySearch') renderCategories();
+  if (event.target.id === 'productSearch') {
+    clearTimeout(productSearchTimer);
+    productSearchTimer = setTimeout(() => { void loadProducts(1).catch(error => notify(error.message)); }, 300);
+  }
+  if (event.target.id === 'categorySearch') { adminCategoryPage = 1; renderCategories(); }
   if (event.target.matches('.admin-product-image-url')) {
     const row = event.target.closest('[data-product-row]');
     const preview = row?.querySelector('[data-product-preview]');
@@ -911,6 +968,9 @@ document.addEventListener('input', (event) => {
 $('#orderStatusFilter')?.addEventListener('change', () => { void loadAdminOrders().catch(error => notify(error.message)); });
 $('#orderPaymentFilter')?.addEventListener('change', () => { void loadAdminOrders().catch(error => notify(error.message)); });
 $('#orderVisibilityFilter')?.addEventListener('change', () => { void loadAdminOrders().catch(error => notify(error.message)); });
+$('#productCategoryFilter')?.addEventListener('change', () => { void loadProducts(1).catch(error => notify(error.message)); });
+$('#productStatusFilter')?.addEventListener('change', () => { void loadProducts(1).catch(error => notify(error.message)); });
+$('#categoryStatusFilter')?.addEventListener('change', () => { adminCategoryPage = 1; renderCategories(); });
 
 document.addEventListener('submit', async (event) => {
   event.preventDefault();
