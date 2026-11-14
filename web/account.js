@@ -32,6 +32,7 @@ function status(message, kind = '') {
 
 async function loadAddresses() {
   const { addresses } = await api('/me/addresses');
+  $('#accountAddressCount').textContent = String(addresses.length);
   $('#savedAddresses').innerHTML = addresses.length ? addresses.map(address => `
     <article class="saved-address-card">
       <div><strong>${esc(address.label)} ${address.isDefault ? '<span class="default-address-badge">Default</span>' : ''}</strong>
@@ -42,6 +43,7 @@ async function loadAddresses() {
 
 async function loadSessions() {
   const { sessions } = await api('/me/sessions');
+  $('#accountSessionCount').textContent = String(sessions.length);
   $('#accountSessions').innerHTML = sessions.length ? sessions.map(session => `
     <article class="account-session-row"><div><strong>${session.isCurrent ? 'This device' : 'Signed-in device'}</strong><small>Started ${esc(dateLabel(session.createdAt))} · Expires ${esc(dateLabel(session.expiresAt))}</small></div>
       ${session.isCurrent ? '<span class="session-current">Current session</span>' : `<button class="action-btn danger-btn" data-revoke-session="${esc(session.id)}">Revoke</button>`}</article>`).join('') : '<div class="empty-state">No active sessions found.</div>';
@@ -108,6 +110,9 @@ document.addEventListener('submit', async event => {
     if (form.id === 'profileForm') {
       const { user } = await api('/me', { method:'PATCH', body:JSON.stringify({ name:$('#profileName').value.trim() }) });
       state.user = user;
+      $('#accountGreeting').textContent = (user.name || 'there').split(/\s+/)[0];
+      $('#accountIdentityName').textContent = user.name;
+      $('#accountAvatar').textContent = (user.name || 'I').split(/\s+/).slice(0,2).map(part => part[0]).join('').toUpperCase();
       status('Profile updated.', 'success');
     } else if (form.id === 'addressForm') {
       const payload = Object.fromEntries(new FormData(form));
@@ -164,6 +169,11 @@ async function initialize() {
     state.googleClientId = config.googleWebClientId;
     $('#profileName').value = state.user.name;
     $('#profileEmail').value = state.user.email;
+    $('#accountGreeting').textContent = (state.user.name || 'there').split(/\s+/)[0];
+    $('#accountIdentityName').textContent = state.user.name;
+    $('#accountIdentityEmail').textContent = state.user.email;
+    $('#accountAvatar').textContent = (state.user.name || 'I').split(/\s+/).slice(0,2).map(part => part[0]).join('').toUpperCase();
+    $('#accountSignInType').textContent = state.user.googleLinked ? 'Google' : 'Password';
     if (state.user.googleLinked) {
       $('#passwordTools').innerHTML = '<p>This account uses Google sign-in. You can set a password by requesting a reset email.</p><button id="requestPasswordReset" class="btn btn-subtle">Send password reset link</button>';
       $('#deletePasswordWrap').hidden = true;

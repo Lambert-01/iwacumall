@@ -328,14 +328,22 @@ export const categories = {
   async findByName(name) {
     return col('categories').findOne({ name });
   },
-  async create({ id, name, slug }) {
-    return col('categories').insertOne({ id, name, slug, active: true, createdAt: new Date() });
+  async create({ id, name, slug, description = '', imageUrl = '', imagePublicId = '' }) {
+    return col('categories').insertOne({ id, name, slug, description, imageUrl, imagePublicId, active: true, createdAt: new Date() });
   },
-  async rename(id, name) {
-    return col('categories').updateOne({ id, active: { $ne: false } }, { $set: { name, updatedAt: new Date() } });
+  async update(id, fields) {
+    return col('categories').updateOne({ id, active: { $ne: false } }, { $set: { ...fields, updatedAt: new Date() } });
+  },
+  async countImageReferences(publicId, exceptId = '') {
+    const query = { imagePublicId: publicId };
+    if (exceptId) query.id = { $ne: exceptId };
+    return col('categories').countDocuments(query);
   },
   async archive(id) {
     return col('categories').updateOne({ id, active: { $ne: false } }, { $set: { active: false, archivedAt: new Date() } });
+  },
+  async restore(id) {
+    return col('categories').updateOne({ id, active: false }, { $set: { active: true, updatedAt: new Date() }, $unset: { archivedAt: '' } });
   },
 };
 
@@ -369,7 +377,7 @@ export const products = {
     const catMap = Object.fromEntries(allCategories.map(c => [c.slug, c.name]));
     const enriched = items.map(p => ({
       ...p,
-      category: p.category || catMap[p.categorySlug] || (p.categorySlug ? p.categorySlug.replace(/-/g, ' ') : 'Uncategorized'),
+      category: catMap[p.categorySlug] || p.category || (p.categorySlug ? p.categorySlug.replace(/-/g, ' ') : 'Uncategorized'),
     }));
 
     return {
@@ -412,6 +420,9 @@ export const products = {
   async countActiveByCategory(categoryId, categorySlug) {
     return col('products').countDocuments({ active: true, $or: [{ categoryId }, { categorySlug }] });
   },
+  async countByCategory(categoryId, categorySlug) {
+    return col('products').countDocuments({ $or: [{ categoryId }, { categorySlug }] });
+  },
   async adjustStock({ productId, adminId, delta, reason }) {
     const db = getDb();
     const session = getClient().startSession();
@@ -446,7 +457,10 @@ export const products = {
       .sort({ createdAt: -1 }).limit(Math.min(100, Math.max(1, limit))).toArray();
   },
   async softDelete(id) {
-    return col('products').updateOne({ id }, { $set: { active: false, updatedAt: new Date() } });
+    return col('products').updateOne({ id, deletedAt: { $exists: false } }, { $set: { active: false, deletedAt: new Date(), updatedAt: new Date() } });
+  },
+  async restore(id) {
+    return col('products').updateOne({ id, deletedAt: { $exists: true } }, { $set: { active: true, updatedAt: new Date() }, $unset: { deletedAt: '' } });
   },
   async countActive() {
     return col('products').countDocuments({ active: true });
@@ -485,17 +499,24 @@ export const orders = {
           }
         }
 
-        // 1. Reserve stock — verify each line holds stock ≥ quantity
-        for (const { productId, quantity } of items) {
-          const result = await db.collection('products').findOneAndUpdate(
-            { id: productId, active: true, stock: { $gte: quantity } },
-            { $inc: { stock: -quantity }, $set: { updatedAt: new Date() } },
-            { session, returnDocument: 'after' }
+        // 1. Verify product availability. New products use the admin's
+        // Available toggle; inventory reservation remains opt-in for any
+        // explicitly tracked legacy product.
+        const reservedLines = new Set();
+        for (const item of items) {
+          const product = await db.collection('products').findOne(
+            { id: item.productId, active: true }, { session }
           );
-          if (!result) throw Object.assign(
-            new Error(`Not enough stock${result?.name ? ` for ${result.name}` : ''}`),
-            { status: 409 }
-          );
+          if (!product) throw Object.assign(new Error('A product in your cart is unavailable'), { status: 409 });
+          if (item.trackInventory === true && product.trackInventory === true) {
+            const result = await db.collection('products').findOneAndUpdate(
+              { id: item.productId, active: true, stock: { $gte: item.quantity } },
+              { $inc: { stock: -item.quantity }, $set: { updatedAt: new Date() } },
+              { session, returnDocument: 'after' }
+            );
+            if (!result) throw Object.assign(new Error(`Not enough stock for ${product.name || 'this product'}`), { status: 409 });
+            reservedLines.add(`${item.productId}\u0000${item.variantId || ''}`);
+          }
         }
 
         // 2. Calculate totals
@@ -518,9 +539,14 @@ export const orders = {
           note:             note || '',
           items:            items.map(i => ({
             productId:   i.productId,
+            variantId:   i.variantId || '',
+            variantType: i.variantType || '',
+            variantValue:i.variantValue || '',
             productName: i.productName,
             unitPrice:   i.unitPrice,
             quantity:    i.quantity,
+            isSecondHand: i.isSecondHand === true,
+            stockReserved: reservedLines.has(`${i.productId}\u0000${i.variantId || ''}`),
           })),
           subtotal,
           deliveryFee:      deliveryFee || 0,
@@ -616,8 +642,8 @@ export const orders = {
     return col('orders').find({ userId }, { projection: { _id: 0 } })
       .sort({ createdAt: -1 }).skip(skip).limit(limit).toArray();
   },
-  async listAdmin({ limit = 100, skip = 0, status, paymentStatus, search } = {}) {
-    const query = {};
+  async listAdmin({ limit = 100, skip = 0, status, paymentStatus, search, includeArchived = false } = {}) {
+    const query = { adminArchivedAt: includeArchived ? { $exists: true } : { $exists: false } };
     if (status)        query.fulfillmentStatus = status;
     if (paymentStatus) query.paymentStatus = paymentStatus;
     if (search) {
@@ -629,8 +655,31 @@ export const orders = {
   },
   async countOpen() {
     return col('orders').countDocuments({
+      adminArchivedAt: { $exists: false },
       fulfillmentStatus: { $nin: ['DELIVERED', 'CANCELLED'] }
     });
+  },
+  async archiveForAdmin({ orderId, adminId }) {
+    const now = new Date();
+    const result = await col('orders').updateOne(
+      { id: orderId, adminArchivedAt: { $exists: false } },
+      { $set: { adminArchivedAt: now, adminArchivedBy: adminId, updatedAt: now } },
+    );
+    if (result.modifiedCount === 1) {
+      await col('auditLog').insertOne({ action: 'ORDER_ARCHIVED', orderId, adminId, detail: 'Removed from active admin order list; order history retained.', createdAt: now });
+    }
+    return result.modifiedCount === 1;
+  },
+  async restoreAdminArchive({ orderId, adminId }) {
+    const now = new Date();
+    const result = await col('orders').updateOne(
+      { id: orderId, adminArchivedAt: { $exists: true } },
+      { $unset: { adminArchivedAt: '', adminArchivedBy: '' }, $set: { updatedAt: now } },
+    );
+    if (result.modifiedCount === 1) {
+      await col('auditLog').insertOne({ action: 'ORDER_RESTORED', orderId, adminId, detail: 'Restored to active admin order list.', createdAt: now });
+    }
+    return result.modifiedCount === 1;
   },
   async sumRevenue() {
     const agg = await col('orders').aggregate([
@@ -952,7 +1001,7 @@ export const orders = {
         if (order.fulfillmentStatus === 'CANCELLED') { changed = false; return; }
 
         // Restore stock
-        for (const line of order.items) {
+        for (const line of order.items.filter(item => item.stockReserved !== false)) {
           await db.collection('products').updateOne(
             { id: line.productId },
             { $inc: { stock: line.quantity }, $set: { updatedAt: new Date() } },
@@ -1001,7 +1050,8 @@ export const orders = {
     try {
       await session.withTransaction(async () => {
         const order = await db.collection('orders').findOne({ id: orderId }, { session });
-        if (!order || order.paymentStatus !== 'PAID' || order.refundStatus === 'FULLY_REFUNDED' || !transitions[order.fulfillmentStatus]?.includes(fulfillmentStatus)) return;
+        const isInitialOrderConfirmation = order?.fulfillmentStatus === 'PLACED' && fulfillmentStatus === 'CONFIRMED';
+        if (!order || (!isInitialOrderConfirmation && order.paymentStatus !== 'PAID') || order.refundStatus === 'FULLY_REFUNDED' || !transitions[order.fulfillmentStatus]?.includes(fulfillmentStatus)) return;
         const now = new Date();
         const result = await db.collection('orders').updateOne(
           { id: orderId, fulfillmentStatus: order.fulfillmentStatus },
@@ -1057,7 +1107,7 @@ export const orders = {
             { session: sess }
           );
           if (r.modifiedCount === 1) {
-            for (const line of order.items) {
+            for (const line of order.items.filter(item => item.stockReserved !== false)) {
               await db.collection('products').updateOne(
                 { id: line.productId },
                 { $inc: { stock: line.quantity }, $set: { updatedAt: expiredAt } },

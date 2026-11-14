@@ -2,21 +2,22 @@ import { createHash, randomUUID } from 'node:crypto';
 import config from './config.mjs';
 
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
-const CLOUDINARY_FOLDER = 'iwacumall/products';
+const CLOUDINARY_FOLDERS = Object.freeze({ product: 'iwacumall/products', category: 'iwacumall/categories' });
 
 export function cloudinaryUploadEnabled() {
   return Boolean(config.cloudinaryCloudName && config.cloudinaryApiKey && config.cloudinaryApiSecret);
 }
 
-function decodeImageDataUrl(dataUrl) {
+function decodeImageDataUrl(dataUrl, kind = 'product') {
+  const label = kind === 'category' ? 'category' : 'product';
   if (typeof dataUrl !== 'string' || dataUrl.length > 12 * 1024 * 1024) {
-    throw Object.assign(new Error('Choose a product photo smaller than 8 MB.'), { status: 400 });
+    throw Object.assign(new Error(`Choose a ${label} photo smaller than 8 MB.`), { status: 400 });
   }
   const match = dataUrl.match(/^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/);
-  if (!match) throw Object.assign(new Error('Use a PNG, JPG or WebP product image.'), { status: 400 });
+  if (!match) throw Object.assign(new Error(`Use a PNG, JPG or WebP ${label} image.`), { status: 400 });
   const buffer = Buffer.from(match[2], 'base64');
   if (!buffer.length || buffer.length > MAX_IMAGE_BYTES) {
-    throw Object.assign(new Error('Choose a product photo smaller than 8 MB.'), { status: 413 });
+    throw Object.assign(new Error(`Choose a ${label} photo smaller than 8 MB.`), { status: 413 });
   }
 
   const isPng = buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
@@ -29,14 +30,14 @@ function decodeImageDataUrl(dataUrl) {
   return { buffer, mimeType };
 }
 
-/** Upload an admin-selected raster image to durable Cloudinary storage. */
-export async function uploadProductImage(dataUrl) {
+/** Upload an admin-selected raster image to its durable Cloudinary folder. */
+async function uploadImage(dataUrl, kind) {
   if (!cloudinaryUploadEnabled()) {
-    throw Object.assign(new Error('Product image storage is not configured.'), { status: 503 });
+    throw Object.assign(new Error('Image storage is not configured.'), { status: 503 });
   }
-  const { buffer, mimeType } = decodeImageDataUrl(dataUrl);
+  const { buffer, mimeType } = decodeImageDataUrl(dataUrl, kind);
   const timestamp = Math.floor(Date.now() / 1000);
-  const publicId = `${CLOUDINARY_FOLDER}/${randomUUID()}`;
+  const publicId = `${CLOUDINARY_FOLDERS[kind]}/${randomUUID()}`;
   const signedParams = `public_id=${publicId}&timestamp=${timestamp}`;
   const signature = createHash('sha1')
     .update(`${signedParams}${config.cloudinaryApiSecret}`)
@@ -66,13 +67,25 @@ export async function uploadProductImage(dataUrl) {
   return { secureUrl: result.secure_url, publicId: result.public_id };
 }
 
+export const uploadProductImage = (dataUrl) => uploadImage(dataUrl, 'product');
+export const uploadCategoryImage = (dataUrl) => uploadImage(dataUrl, 'category');
+
 /** Delete only assets created inside this application's product folder. */
 export async function deleteProductImage(publicId) {
-  if (typeof publicId !== 'string' || !/^iwacumall\/products\/[0-9a-f-]{36}$/i.test(publicId)) {
-    throw Object.assign(new Error('Invalid product image identifier.'), { status: 400 });
+  return deleteImage(publicId, 'product');
+}
+
+export async function deleteCategoryImage(publicId) {
+  return deleteImage(publicId, 'category');
+}
+
+async function deleteImage(publicId, kind) {
+  const folder = CLOUDINARY_FOLDERS[kind];
+  if (typeof publicId !== 'string' || !new RegExp(`^${folder.replace('/', '\\/')}\\/[0-9a-f-]{36}$`, 'i').test(publicId)) {
+    throw Object.assign(new Error('Invalid image identifier.'), { status: 400 });
   }
   if (!cloudinaryUploadEnabled()) {
-    throw Object.assign(new Error('Product image storage is not configured.'), { status: 503 });
+    throw Object.assign(new Error('Image storage is not configured.'), { status: 503 });
   }
   const timestamp = Math.floor(Date.now() / 1000);
   const signedParams = `invalidate=true&public_id=${publicId}&timestamp=${timestamp}`;
@@ -96,7 +109,7 @@ export async function deleteProductImage(publicId) {
   }
   const result = await response.json().catch(() => null);
   if (!response.ok || !['ok', 'not found'].includes(result?.result)) {
-    throw Object.assign(new Error('Image storage could not remove the previous product photo.'), { status: 502 });
+    throw Object.assign(new Error('Image storage could not remove the previous photo.'), { status: 502 });
   }
   return true;
 }

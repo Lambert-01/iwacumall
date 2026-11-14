@@ -31,7 +31,7 @@ Set these values before production startup:
 - `EMAIL_VERIFICATION_REQUIRED=true`, plus real `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, and `SMTP_FROM`.
 - Set `TRUST_PROXY_HOPS` to the number of trusted reverse proxies. Keep `CORS_ORIGINS` empty when browser and API share the same origin.
 
-The app intentionally refuses production startup when required secrets, email, store contact or HTTPS URL still look like placeholders. On first startup it provisions the admin from `ADMIN_EMAIL` and `ADMIN_PASSWORD`. Sign in and enroll an authenticator before other admin features are available.
+The app intentionally refuses production startup when required secrets, email, store contact or HTTPS URL still look like placeholders. On first startup it provisions the admin from `ADMIN_EMAIL` and `ADMIN_PASSWORD`. Administrator MFA is optional; enable it from **Admin → Store settings** for stronger protection before exposing the production admin publicly.
 
 Start the API:
 
@@ -130,7 +130,7 @@ The repository has not yet been validated on a physical Android device or iOS. D
 3. For Android, create an **Android** OAuth client with package name `com.iwacumall.app` and the SHA-1 certificate fingerprints for debug and release signing. Keep the Web client ID configured as `GOOGLE_WEB_CLIENT_ID`; the Flutter app uses it as the OAuth server client ID when requesting a verifiable ID token.
 4. Rebuild the Android app after adding the OAuth client. Test Google sign-in on a physical phone with the final signing certificate and a production HTTPS API URL.
 
-Google sign-in creates customer accounts and links an existing customer account only after its email has already been verified in IwacuMall and Google returns that same verified email. Administrator accounts must continue to use the existing password plus MFA flow.
+Google sign-in creates customer accounts and links an existing customer account only after its email has already been verified in IwacuMall and Google returns that same verified email. Administrator accounts use password sign-in; authenticator MFA is required at sign-in only when enabled for that account.
 
 ## Durable product photo uploads
 

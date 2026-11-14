@@ -105,7 +105,7 @@ export async function sendOrderInvoiceEmail(order, storeSettings = {}, pdfBuffer
     ? new Date(order.paymentDeadline).toLocaleString('en-GB', { timeZone: 'Africa/Kigali' })
     : 'Not specified';
   const items = (order.items || []).map(item => ({
-    name: String(item.productName || item.productId || 'Item'),
+    name: `${String(item.productName || item.productId || 'Item')}${item.isSecondHand === true ? ' · Pre-owned' : ''}`,
     quantity: Number(item.quantity || 1),
     unitPrice: Number(item.unitPrice || 0),
   }));

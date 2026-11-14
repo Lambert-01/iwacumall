@@ -65,7 +65,7 @@ function renderInvoice(order) {
   const items = order.items || [];
   const currency = 'RWF';
   $('#itemsBody').innerHTML = items.map(i =>
-    `<tr><td style="padding:.35rem 0">${esc(i.productName)}</td><td style="text-align:right">${Number(i.quantity)}</td><td style="text-align:right">${fmt(i.unitPrice,currency)}</td><td style="text-align:right">${fmt(i.unitPrice*i.quantity,currency)}</td></tr>`
+    `<tr><td style="padding:.35rem 0">${esc(i.productName)}${i.isSecondHand === true ? ' · Pre-owned' : ''}</td><td style="text-align:right">${Number(i.quantity)}</td><td style="text-align:right">${fmt(i.unitPrice,currency)}</td><td style="text-align:right">${fmt(i.unitPrice*i.quantity,currency)}</td></tr>`
   ).join('');
 
   // Totals

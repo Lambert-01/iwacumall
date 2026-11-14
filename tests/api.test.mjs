@@ -26,6 +26,9 @@ process.env.TAX_RATE_PERCENT     = '0';
 process.env.SEED_DEMO_CATALOG    = 'true';
 process.env.GOOGLE_CLIENT_IDS    = '';
 process.env.GOOGLE_WEB_CLIENT_ID = '';
+process.env.CLOUDINARY_CLOUD_NAME = '';
+process.env.CLOUDINARY_API_KEY = '';
+process.env.CLOUDINARY_API_SECRET = '';
 
 // ── MongoDB: use in-memory replica set (supports transactions) or test URI ───
 let replSet;
@@ -117,6 +120,31 @@ test('public endpoints are accessible without auth', async () => {
   assert.ok(categories.data.categories.length >= 6);
 });
 
+test('configured Google web client is exposed for storefront sign-in', async () => {
+  const config = (await import('../server/config.mjs')).default;
+  const previousClientId = config.googleWebClientId;
+  const clientId = '123456789012-test-web-client.apps.googleusercontent.com';
+  config.googleWebClientId = clientId;
+  try {
+    const result = await api('/config');
+    assert.equal(result.status, 200);
+    assert.equal(result.data.googleWebClientId, clientId);
+    assert.equal(result.data.productImageUploadsEnabled, false);
+  } finally {
+    config.googleWebClientId = previousClientId;
+  }
+});
+
+test('admin route shows its dedicated password and MFA sign-in form', async () => {
+  const response = await fetch(`${base}/admin`);
+  const html = await response.text();
+  assert.equal(response.status, 200);
+  assert.match(html, /id="adminLoginForm"/);
+  assert.match(html, /name="totpCode"/);
+  assert.match(html, /admin-login-brand/);
+  assert.doesNotMatch(html, /Return to storefront/);
+});
+
 test('Google sign-in stays closed until an OAuth client is configured', async () => {
   const result = await api('/auth/google', 'POST', { idToken: 'untrusted-placeholder-token' });
   assert.equal(result.status, 503);
@@ -159,7 +187,7 @@ test('customer register, login and account flows', async () => {
 
 test('admin login', async () => {
   const login = await api('/auth/login', 'POST', {
-    email: 'admin@test.example', password: 'VeryStrongTest12345!',
+    email: process.env.ADMIN_EMAIL, password: process.env.ADMIN_PASSWORD,
   });
   assert.equal(login.status, 200);
   adminToken = login.data.token;
@@ -559,6 +587,8 @@ test('product gallery validates photos, keeps the first as primary, and survives
   assert.equal(fetched.status, 200);
   assert.deepEqual(fetched.data.product.images, photos);
   assert.equal(fetched.data.product.imageUrl, photos[0].url);
+  const storefrontCatalog = await api('/products?limit=100');
+  assert.ok(storefrontCatalog.data.products.some(product => product.id === created.data.id && product.imageUrl === photos[0].url));
 
   const reordered = [photos[1], { url: 'https://images.example/widget-detail.jpg', publicId: '' }];
   const changed = await api(`/admin/products/${created.data.id}`, 'PATCH', { images: reordered }, adminToken);
@@ -586,6 +616,12 @@ test('product gallery validates photos, keeps the first as primary, and survives
     images: [{ url: 'https://images.example/not-cloudinary.jpg', publicId: 'iwacumall/products/00000000-0000-4000-8000-000000000000' }],
   }, adminToken);
   assert.equal(unownedCloudinaryId.status, 400);
+});
+
+test('product image uploads explain that Cloudinary storage is required when it is not configured', async () => {
+  const result = await api('/admin/uploads/product-image', 'POST', { dataUrl: 'data:image/png;base64,AA==' }, adminToken);
+  assert.equal(result.status, 503);
+  assert.match(result.data.error, /Cloudinary storage configured/i);
 });
 
 test('password reset flow', async () => {

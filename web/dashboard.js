@@ -3,6 +3,7 @@ const $ = (selector) => document.querySelector(selector);
 const fmt = (value) => `RWF ${Number(value || 0).toLocaleString('en-US')}`;
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const page = document.body.dataset.page;
+let adminMfaEnabled = false;
 
 function getCSRFToken() {
   const m = document.cookie.match(/(?:^|;\s*)iwm_csrf=([^;]+)/);
@@ -27,7 +28,11 @@ async function api(path, options = {}) {
     },
   });
   const data = await response.json();
-  if (!response.ok) throw Error(data.error || 'Request failed');
+  if (!response.ok) {
+    const message = data.error || 'Request failed';
+    console.error(`[admin API] ${options.method || 'GET'} ${path} returned HTTP ${response.status}: ${message}`);
+    throw Error(message);
+  }
   return data;
 }
 
@@ -68,8 +73,8 @@ let adminOrdersReloadQueued = false;
 let adminOrdersOpenCount = 0;
 
 const fulfillmentNext = {
-  PLACED:['CONFIRMED','CANCELLED'], CONFIRMED:['PACKING','CANCELLED'],
-  PACKING:['OUT_FOR_DELIVERY','CANCELLED'], OUT_FOR_DELIVERY:['DELIVERED','CANCELLED'],
+  PLACED:['CONFIRMED'], CONFIRMED:['PACKING'],
+  PACKING:['OUT_FOR_DELIVERY'], OUT_FOR_DELIVERY:['DELIVERED'],
   DELIVERED:[], CANCELLED:[],
 };
 
@@ -98,33 +103,40 @@ function renderAdminOrders() {
     const orderItems  = (order.items || []).map(item => `${esc(item.productName||item.product_name)} × ${Number(item.quantity)}`).join(' · ');
     const snap = order.paymentMethodSnapshot || {};
     const methodLabel = snap.label || order.paymentMethodLabel || 'Unknown';
+    const isArchived = Boolean(order.adminArchivedAt);
 
     // Payment confirmation controls (only for PENDING payment)
-    const paymentControls = pStatus === 'PENDING' ? `
+    const paymentControls = isArchived ? '' : pStatus === 'PENDING' ? `
       <details class="confirm-payment-details">
         <summary>Confirm payment received</summary>
         <form class="confirm-payment-form" data-order-id="${esc(order.id)}">
-          <input class="form-control" name="paymentRef" placeholder="Payment reference / note (required)" required minlength="2">
+          <label>Payment reference<input class="form-control" name="paymentRef" placeholder="Reference from the payment proof" required minlength="2"></label>
           <input class="form-control" name="note" placeholder="Optional internal note">
-          <button class="action-btn" type="submit">✔ Mark as paid</button>
+          <button class="action-btn" type="submit">Confirm payment received</button>
         </form>
       </details>` : (pStatus === 'PAID' ? `<div style="color:#155724;font-size:.85rem">✅ Payment confirmed</div>${refundTotal ? `<div style="color:#815b00;font-size:.82rem">Refunded ${fmt(refundTotal)} · ${esc(order.refundStatus || 'PARTIAL')}</div>` : ''}` : `<div style="color:#721c24;font-size:.85rem">Payment: ${esc(pStatus)}</div>`);
-    const refundControls = pStatus === 'PAID' && refundRemaining > 0
+    const refundControls = !isArchived && pStatus === 'PAID' && refundRemaining > 0
       ? `<button class="action-btn danger-btn" data-refund-order="${esc(order.id)}" data-refund-remaining="${refundRemaining}" style="margin-top:.5rem">Record refund · up to ${fmt(refundRemaining)}</button>` : '';
 
     // Fulfillment update controls
-    const nextAction = pStatus !== 'PAID' && fStatus !== 'CANCELLED'
-      ? `<div class="admin-order-controls" style="opacity:.5" title="Confirm payment first"><select class="form-control" disabled><option>Update fulfillment (payment required first)</option></select></div>`
-      : (transitions.length ? `<div class="admin-order-controls"><select class="form-control" data-order-select="${esc(order.id)}" aria-label="Next status">${transitions.map(next=>`<option value="${next}">${next.replaceAll('_',' ')}</option>`).join('')}</select><button class="action-btn" data-update-status="${esc(order.id)}">Update</button></div>` : '');
+    const nextAction = isArchived
+      ? `<button class="action-btn" data-restore-order="${esc(order.id)}">Restore order</button>`
+      : fStatus === 'PLACED'
+        ? `<button class="action-btn order-primary-action" data-confirm-order="${esc(order.id)}">✓ Confirm order</button><small class="order-confirm-separation">This does not confirm payment.</small>`
+        : pStatus !== 'PAID' && fStatus !== 'CANCELLED'
+          ? `<div class="order-action-hint">Confirm payment before packing and delivery can continue.</div>`
+          : (transitions.length ? `<div class="admin-order-controls"><select class="form-control" data-order-select="${esc(order.id)}" aria-label="Next status">${transitions.map(next=>`<option value="${next}">${next.replaceAll('_',' ')}</option>`).join('')}</select><button class="action-btn" data-update-status="${esc(order.id)}">Update status</button></div>` : '');
 
     // Cancel button (only for unpaid)
-    const cancelBtn = !['CANCELLED','DELIVERED'].includes(fStatus) && pStatus !== 'PAID'
+    const cancelBtn = !isArchived && !['CANCELLED','DELIVERED'].includes(fStatus) && pStatus !== 'PAID'
       ? `<button class="action-btn danger-btn" data-cancel-order="${esc(order.id)}" style="margin-top:.5rem">✕ Cancel order</button>` : '';
+    const archiveAction = !isArchived
+      ? `<button class="action-btn danger-btn" data-archive-order="${esc(order.id)}">Delete from order list</button>` : '';
 
     const returnRequests = (order.returnRequests || []).map(request => {
-      const items = (request.items || []).map(item => `<li>${esc(item.productName)} × ${Number(item.quantity)}${request.status === 'RECEIVED' ? ` · received ${Number(item.returnedQuantity || 0)} · restocked ${Number(item.restockedQuantity || 0)}` : ''}</li>`).join('');
+      const items = (request.items || []).map(item => `<li>${esc(item.productName)} × ${Number(item.quantity)}${request.status === 'RECEIVED' ? ` · received ${Number(item.returnedQuantity || 0)}` : ''}</li>`).join('');
       const review = request.status === 'REQUESTED' ? `<div class="admin-return-actions"><form class="return-review-form" data-order-id="${esc(order.id)}" data-request-id="${esc(request.id)}" data-decision="APPROVED"><textarea class="form-control" name="reviewNote" maxlength="300" placeholder="Optional customer-facing note"></textarea><button class="action-btn" type="submit">Approve return</button></form><form class="return-review-form" data-order-id="${esc(order.id)}" data-request-id="${esc(request.id)}" data-decision="REJECTED"><textarea class="form-control" name="reviewNote" maxlength="300" placeholder="Explain why you cannot accept this return" required minlength="5"></textarea><button class="action-btn danger-btn" type="submit">Reject return</button></form></div>` : '';
-      const receive = request.status === 'APPROVED' ? `<form class="return-receive-form" data-order-id="${esc(order.id)}" data-request-id="${esc(request.id)}"><strong>Inspect returned goods</strong>${(request.items || []).map(item => `<div class="return-receive-item"><span>${esc(item.productName)} · approved ${Number(item.quantity)}</span><label>Received<input class="form-control" type="number" data-return-received="${esc(item.productId)}" min="0" max="${Number(item.quantity)}" value="0" required></label><label>Restockable<input class="form-control" type="number" data-return-restock="${esc(item.productId)}" min="0" max="${Number(item.quantity)}" value="0" required></label></div>`).join('')}<textarea class="form-control" name="note" maxlength="300" placeholder="Inspection note (optional)"></textarea><button class="action-btn" type="submit">Mark received and restock</button></form>` : '';
+      const receive = request.status === 'APPROVED' ? `<form class="return-receive-form" data-order-id="${esc(order.id)}" data-request-id="${esc(request.id)}"><strong>Inspect returned goods</strong>${(request.items || []).map(item => `<div class="return-receive-item"><span>${esc(item.productName)} · approved ${Number(item.quantity)}</span><label>Received<input class="form-control" type="number" data-return-received="${esc(item.productId)}" min="0" max="${Number(item.quantity)}" value="0" required></label></div>`).join('')}<textarea class="form-control" name="note" maxlength="300" placeholder="Inspection note (optional)"></textarea><button class="action-btn" type="submit">Mark inspection complete</button></form>` : '';
       return `<section class="admin-return-request"><strong>Return ${esc(String(request.status || 'REQUESTED').replaceAll('_',' '))}</strong><small>${esc(formatDate(request.requestedAt))} · ${esc(request.reason)}</small><ul>${items}</ul>${request.reviewNote ? `<p>${esc(request.reviewNote)}</p>` : ''}${review}${receive}</section>`;
     }).join('');
 
@@ -151,13 +163,14 @@ function renderAdminOrders() {
           ${returnRequests ? `<div class="admin-return-list">${returnRequests}</div>` : ''}
         </div>
         <div>
-          ${paymentControls}
+          ${isArchived ? '<div class="archived-order-note">This order is hidden from the active queue. Invoice and history are retained.</div>' : paymentControls}
           ${refundControls}
           ${nextAction}
           ${cancelBtn}
           <a class="action-btn" href="/invoice?order=${esc(order.id)}" target="_blank" style="margin-top:.4rem;display:inline-block">🖨 View invoice</a>
           <a class="action-btn" href="/api/orders/${esc(order.id)}/invoice.pdf" target="_blank" style="margin-top:.4rem;display:inline-block">📥 Download PDF</a>
           <button class="action-btn" data-view-audit="${esc(order.id)}" style="margin-top:.4rem">📋 Audit log</button>
+          ${archiveAction}
         </div>
       </div>
     </article>`;
@@ -181,9 +194,11 @@ async function loadAdminOrdersPage(append) {
   const params = new URLSearchParams({ limit:String(limit), skip:String(adminOrdersSkip) });
   const status = $('#orderStatusFilter')?.value || 'all';
   const paymentStatus = $('#orderPaymentFilter')?.value || 'all';
+  const includeArchived = $('#orderVisibilityFilter')?.value === 'deleted';
   const search = ($('#orderSearch')?.value || '').trim();
   if (status !== 'all') params.set('status', status);
   if (paymentStatus !== 'all') params.set('paymentStatus', paymentStatus);
+  if (includeArchived) params.set('includeArchived', 'true');
   if (search) params.set('search', search);
   const button = $('#loadMoreAdminOrders');
   adminOrdersLoading = true;
@@ -225,6 +240,9 @@ async function loadEmailOutbox() {
 
 let adminProducts = [];
 let adminCategories = [];
+let productImageUploadsEnabled = false;
+let productImageUploadPromise = Promise.resolve();
+let categoryImageUploadPromise = Promise.resolve();
 
 function adminImageGallery(product) {
   if (Array.isArray(product?.images)) {
@@ -237,27 +255,34 @@ function adminImageGallery(product) {
 
 function renderProducts() {
   const query    = ($('#productSearch')?.value || '').trim().toLowerCase();
-  const stockFilter = $('#inventoryStockFilter')?.value || 'all';
   const products = adminProducts.filter(p => {
-    const matchesText = `${p.name} ${p.category||p.categorySlug||''}`.toLowerCase().includes(query);
-    const stock = Number(p.stock || 0);
-    const matchesStock = stockFilter === 'low' ? stock > 0 && stock <= 5 : stockFilter === 'out' ? stock === 0 : true;
-    return matchesText && matchesStock;
+    const matchesText = `${p.name} ${p.description||''} ${p.category||p.categorySlug||''}`.toLowerCase().includes(query);
+    return matchesText;
   });
-  $('#productCount').textContent = `${products.length} ${products.length===1?'product':'products'} shown`;
-  if (!products.length) { $('#adminProducts').innerHTML = '<div class="empty-state">No products match your search.</div>'; return; }
-  $('#adminProducts').innerHTML = products.map(product => {
-    const currentCategory = adminCategories.find(c => c.slug === product.categorySlug);
-    const categoryOptions = adminCategories.filter(c => c.active !== false).map(c => `<option value="${esc(c.slug)}" ${c.slug === product.categorySlug ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
-    const archivedOption = currentCategory?.active === false ? `<option value="${esc(currentCategory.slug)}" selected>${esc(currentCategory.name)} · archived</option>` : '';
-    const gallery = adminImageGallery(product);
-    return `<div class="admin-product-row" data-product-row="${esc(product.id)}">
-      <div class="admin-product-photo-edit"><img class="admin-product-image" data-product-preview="${esc(product.id)}" src="${esc(product.imageUrl||'/assets/products/fallback.png')}" alt="" loading="lazy" onerror="this.src='/assets/products/fallback.png'"><button class="action-btn" type="button" data-trigger-product-image="${esc(product.id)}">Photos</button><small data-product-image-status>${gallery.length > 1 ? `${gallery.length} photos` : ''}</small><input type="file" accept="image/png,image/jpeg,image/webp" data-product-image-file="${esc(product.id)}" multiple hidden></div>
-      <div class="admin-product-edit-fields"><input class="form-control admin-product-name-input" data-field="name" aria-label="Name for ${esc(product.name)}" value="${esc(product.name)}"><select class="form-control admin-product-category-select" data-field="categorySlug" aria-label="Category for ${esc(product.name)}">${archivedOption}${categoryOptions}</select><input class="form-control admin-product-image-url" data-field="imageUrl" aria-label="Primary photo URL for ${esc(product.name)}" value="${esc(product.imageUrl||'')}" placeholder="Primary image URL"><input type="hidden" data-field="imagePublicId" value="${esc(product.imagePublicId||'')}"><input type="hidden" data-field="images" value="${esc(JSON.stringify(gallery))}"><span class="admin-product-category">${product.active?'Visible in store':'Hidden from store'}</span></div>
-      <div><input class="form-control" data-field="price" type="number" min="0" step="1" aria-label="Price" value="${Number(product.price)}"><small class="admin-product-price">Price · RWF</small></div>
-      <div class="admin-stock-adjust"><strong class="${Number(product.stock)<=5?'stock-warning':''}">${Number(product.stock)} in stock</strong><div><input class="form-control" data-stock-delta type="number" step="1" value="1" aria-label="Stock adjustment amount"><button class="action-btn" data-adjust-stock="${esc(product.id)}">Adjust</button></div></div>
-      <div class="admin-product-actions"><button class="action-btn" data-save-product="${esc(product.id)}">Save</button><button class="action-btn" data-stock-history="${esc(product.id)}">History</button><button class="action-btn danger-btn" data-hide-product="${esc(product.id)}" ${product.active?'':'disabled'}>Hide</button></div>
-    </div>`;
+  const count = $('#productCount');
+  if (count) count.textContent = `${products.length} ${products.length===1?'product':'products'} shown`;
+  const tbody = $('#adminProducts');
+  if (!products.length) { tbody.innerHTML = '<tr><td colspan="9"><div class="empty-state">No products match your search.</div></td></tr>'; return; }
+  tbody.innerHTML = products.map(product => {
+    const variants = Array.isArray(product.variants) ? product.variants : [];
+    const variantSummary = variants.length
+      ? `<small class="admin-table-subtext">${variants.length} option${variants.length === 1 ? '' : 's'} · ${esc(variants.slice(0, 3).map(variant => variant.value).join(', '))}${variants.length > 3 ? '…' : ''}</small>`
+      : '';
+    const isDeleted = Boolean(product.deletedAt);
+    const isAvailable = product.active !== false;
+    const available = isDeleted ? '<span class="admin-status-pill is-inactive">Deleted</span>' : `<button type="button" class="admin-availability ${isAvailable ? 'is-available' : 'is-unavailable'}" data-toggle-product="${esc(product.id)}" data-active="${isAvailable ? '1' : '0'}" aria-label="Mark ${esc(product.name)} ${isAvailable ? 'unavailable' : 'available'}" aria-pressed="${isAvailable}">${isAvailable ? 'Available' : 'Unavailable'}</button>`;
+    const photo = product.imageUrl ? `<img class="admin-table-photo" src="${esc(product.imageUrl)}" alt="${esc(product.name)}" loading="lazy" onerror="this.src='/assets/products/fallback.png'">` : '<span class="admin-table-photo-placeholder">✦</span>';
+    return `<tr>
+      <td><strong class="admin-table-primary">${esc(product.name)}</strong>${product.isSecondHand === true ? '<span class="condition-badge admin-condition-badge">Pre-owned</span>' : ''}${variantSummary}</td>
+      <td><span class="admin-table-description" title="${esc(product.description||'')}">${esc(product.description||'—')}</span></td>
+      <td>${esc(product.category||product.categorySlug||'Uncategorized')}</td>
+      <td class="admin-table-price">${fmt(product.price)}</td>
+      <td>${photo}</td>
+      <td>${available}</td>
+      <td class="admin-table-date">${esc(formatDate(product.createdAt||product.created_at))}</td>
+      <td><span class="admin-status-pill ${isDeleted || product.active===false?'is-inactive':'is-active'}">${isDeleted?'Deleted':product.active===false?'Unavailable':'Listed'}</span></td>
+      <td><div class="admin-table-actions">${isDeleted ? `<button class="action-btn" data-restore-product="${esc(product.id)}">Restore</button>` : `<button class="action-btn" data-edit-product="${esc(product.id)}">Edit</button><button class="action-btn danger-btn" data-hide-product="${esc(product.id)}">Delete</button>`}</div></td>
+    </tr>`;
   }).join('');
 }
 
@@ -326,11 +351,13 @@ async function uploadProductPhoto(fileList, productId = '') {
 
 document.addEventListener('change', (event) => {
   if (event.target.id === 'productImageFile') {
-    const upload = uploadProductPhoto(event.target.files);
-    event.target.value = '';
-    void upload.catch(error => {
+    const input = event.target;
+    const upload = uploadProductPhoto(input.files);
+    input.value = '';
+    input.disabled = true;
+    productImageUploadPromise = upload.catch(error => {
       $('#productImageUploadStatus').textContent = error.message;
-    });
+    }).finally(() => { input.disabled = !productImageUploadsEnabled; });
   }
   if (event.target.matches('[data-product-image-file]')) {
     const id = event.target.dataset.productImageFile;
@@ -343,12 +370,173 @@ document.addEventListener('change', (event) => {
   }
 });
 
+async function uploadCategoryPhoto(file) {
+  const status = $('#categoryImageUploadStatus');
+  if (!file) return;
+  if (!['image/png','image/jpeg','image/webp'].includes(file.type)) throw new Error('Choose a PNG, JPG or WebP image.');
+  if (file.size > 8 * 1024 * 1024) throw new Error('Choose an image smaller than 8 MB.');
+  status.textContent = 'Uploading photo to Cloudinary…';
+  const reader = new FileReader();
+  const dataUrl = await new Promise((resolve, reject) => {
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error(`Could not read ${file.name}.`));
+    reader.readAsDataURL(file);
+  });
+  const result = await api('/admin/uploads/category-image', {method:'POST', body:JSON.stringify({dataUrl})});
+  $('#categoryImageUrl').value = result.imageUrl;
+  $('#categoryImagePublicId').value = result.publicId;
+  const preview = $('#categoryImagePreview');
+  preview.src = result.imageUrl;
+  preview.hidden = false;
+  status.textContent = 'Photo uploaded and ready to save.';
+}
+
+function openProductEditor(productId = '') {
+  const form = $('#createProduct');
+  const dialog = $('#productEditorDialog');
+  const product = adminProducts.find(item => item.id === productId);
+  form.reset();
+  form.elements.namedItem('productId').value = product?.id || '';
+  form.elements.namedItem('name').value = product?.name || '';
+  form.elements.namedItem('description').value = product?.description || '';
+  form.elements.namedItem('price').value = product ? Number(product.price) : '';
+  form.elements.namedItem('categorySlug').value = product?.categorySlug || adminCategories.find(category => category.active !== false)?.slug || '';
+  form.elements.namedItem('featured').checked = product?.featured === true;
+  form.elements.namedItem('isSecondHand').checked = product?.isSecondHand === true;
+  renderProductVariantRows(product?.variants || []);
+  const gallery = product ? adminImageGallery(product) : [];
+  $('#productImageUrl').value = gallery[0]?.url || '';
+  $('#productImagePublicId').value = gallery[0]?.publicId || '';
+  $('#productImages').value = JSON.stringify(gallery);
+  const preview = $('#productImagePreview');
+  preview.src = gallery[0]?.url || '';
+  preview.hidden = !gallery[0]?.url;
+  $('#productImageUploadStatus').textContent = gallery.length ? `${gallery.length} saved photo${gallery.length === 1 ? '' : 's'} · choose files to replace` : '';
+  $('#productDialogTitle').textContent = product ? 'Edit product' : 'Add product';
+  $('#productDialogDescription').textContent = product ? 'Update the catalog details and product photos.' : 'Add the details shoppers will see in the store.';
+  $('#saveProductButton').innerHTML = product ? 'Save changes <span>→</span>' : 'Add to catalog <span>→</span>';
+  $('#productImageFile').value = '';
+  productImageUploadPromise = Promise.resolve();
+  dialog.showModal();
+}
+
+function newVariantId() {
+  return window.crypto?.randomUUID ? window.crypto.randomUUID() : `variant_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function renderProductVariantRows(variants = []) {
+  const host = $('#productVariantRows');
+  host.innerHTML = (Array.isArray(variants) ? variants : []).map(variant => `
+    <div class="product-variant-row" data-product-variant-row data-variant-id="${esc(variant.id || newVariantId())}">
+      <label>Option type<input class="form-control" data-variant-type value="${esc(variant.type || '')}" placeholder="Size, flavour, colour…" maxlength="50" required></label>
+      <label>Option name<input class="form-control" data-variant-value value="${esc(variant.value || '')}" placeholder="Large, Vanilla, Blue…" maxlength="100" required></label>
+      <label>Price (RWF)<input class="form-control" data-variant-price type="number" min="0" max="100000000" step="1" value="${variant.price !== '' && variant.price !== null && Number.isSafeInteger(Number(variant.price)) ? Number(variant.price) : ''}" required></label>
+      <button class="product-variant-remove" type="button" data-remove-product-variant aria-label="Remove option">×</button>
+    </div>`).join('');
+  syncProductVariantRows();
+}
+
+function syncProductVariantRows() {
+  const rows = [...document.querySelectorAll('[data-product-variant-row]')];
+  const variants = rows.map(row => ({
+    id: row.dataset.variantId,
+    type: row.querySelector('[data-variant-type]').value.trim(),
+    value: row.querySelector('[data-variant-value]').value.trim(),
+    price: row.querySelector('[data-variant-price]').value === '' ? '' : Number(row.querySelector('[data-variant-price]').value),
+  }));
+  $('#productVariants').value = JSON.stringify(variants);
+  const basePrice = $('#productBasePrice');
+  const label = $('#productBasePriceLabel');
+  basePrice.readOnly = variants.length > 0;
+  label.firstChild.textContent = variants.length ? 'Starting price (RWF)' : 'Price (RWF)';
+  const validPrices = variants.map(variant => variant.price).filter(Number.isSafeInteger);
+  if (variants.length && validPrices.length === variants.length) basePrice.value = Math.min(...validPrices);
+  if (!variants.length) $('#productVariants').value = '[]';
+}
+
+$('#addProductVariant')?.addEventListener('click', () => {
+  const existing = JSON.parse($('#productVariants').value || '[]');
+  existing.push({ id: newVariantId(), type: '', value: '', price: $('#productBasePrice').value });
+  renderProductVariantRows(existing);
+  document.querySelector('[data-product-variant-row]:last-child [data-variant-type]')?.focus();
+});
+
+$('#productVariantRows')?.addEventListener('input', syncProductVariantRows);
+$('#productVariantRows')?.addEventListener('click', event => {
+  const remove = event.target.closest('[data-remove-product-variant]');
+  if (!remove) return;
+  remove.closest('[data-product-variant-row]')?.remove();
+  syncProductVariantRows();
+});
+
+function openCategoryEditor(categoryId = '') {
+  const form = $('#createCategory');
+  const dialog = $('#categoryEditorDialog');
+  const category = adminCategories.find(item => item.id === categoryId);
+  form.reset();
+  form.elements.namedItem('categoryId').value = category?.id || '';
+  form.elements.namedItem('name').value = category?.name || '';
+  form.elements.namedItem('description').value = category?.description || '';
+  $('#categoryImageUrl').value = category?.imageUrl || '';
+  $('#categoryImagePublicId').value = category?.imagePublicId || '';
+  const preview = $('#categoryImagePreview');
+  preview.src = category?.imageUrl || '';
+  preview.hidden = !category?.imageUrl;
+  $('#categoryImageUploadStatus').textContent = category?.imageUrl ? 'Current category photo · choose a file to replace' : '';
+  $('#categoryDialogTitle').textContent = category ? 'Edit category' : 'Add category';
+  $('#categoryDialogDescription').textContent = category ? 'Update the category details and storefront image.' : 'Add a name, a short description, and an optional image.';
+  $('#saveCategoryButton').innerHTML = category ? 'Save changes <span>→</span>' : 'Add category <span>→</span>';
+  $('#categoryImageFile').value = '';
+  categoryImageUploadPromise = Promise.resolve();
+  dialog.showModal();
+}
+
+$('#categoryImageFile')?.addEventListener('change', event => {
+  const input = event.target;
+  const file = input.files?.[0];
+  input.value = '';
+  input.disabled = true;
+  categoryImageUploadPromise = uploadCategoryPhoto(file).catch(error => {
+    $('#categoryImageUploadStatus').textContent = error.message;
+  }).finally(() => { input.disabled = !productImageUploadsEnabled; });
+});
+
 async function loadCategories() {
   const {categories} = await api('/admin/categories');
   adminCategories = categories;
-  $('#adminCategories').innerHTML = categories.length
-    ? categories.map((c,i) => `<div class="admin-category-item ${c.active===false?'archived':''}"><span class="admin-category-icon">${categoryIcon(c.slug)}</span><div><input class="form-control admin-category-name" data-category-name="${esc(c.id)}" value="${esc(c.name)}" aria-label="Category name ${esc(c.name)}" ${c.active===false?'disabled':''}><small>${esc(c.slug)} · ${c.active===false?'Archived':'Store category '+(i+1)}</small></div>${c.active===false?'<span class="admin-product-category">Archived</span>':`<button class="action-btn" data-save-category="${esc(c.id)}">Save</button><button class="action-btn danger-btn" data-archive-category="${esc(c.id)}">Archive</button>`}</div>`).join('')
-    : '<div class="empty-state">Add your first category to organize the catalog.</div>';
+  renderCategories();
+  const select = $('#adminCategorySelect');
+  if (select) select.innerHTML = categories.filter(c => c.active !== false).map(c => `<option value="${esc(c.slug)}">${esc(c.name)}</option>`).join('');
+  if (!categories.some(category => category.active !== false)) {
+    const button = $('#saveProductButton');
+    if (button) button.disabled = true;
+  } else {
+    const button = $('#saveProductButton');
+    if (button) button.disabled = false;
+  }
+}
+
+function renderCategories() {
+  const query = ($('#categorySearch')?.value || '').trim().toLowerCase();
+  const filtered = adminCategories.filter(category => `${category.name} ${category.description||''}`.toLowerCase().includes(query));
+  const count = $('#categoryCount');
+  if (count) count.textContent = `${filtered.length} ${filtered.length === 1 ? 'category' : 'categories'} shown`;
+  const tbody = $('#adminCategories');
+  if (!filtered.length) {
+    tbody.innerHTML = `<tr><td colspan="6"><div class="empty-state">${adminCategories.length ? 'No categories match your search.' : 'Add your first category to organize the catalog.'}</div></td></tr>`;
+    return;
+  }
+  tbody.innerHTML = filtered.map(category => {
+    const image = category.imageUrl ? `<img class="admin-table-photo category-table-photo" src="${esc(category.imageUrl)}" alt="${esc(category.name)}" loading="lazy" onerror="this.src='/assets/products/fallback.png'">` : `<span class="admin-table-photo-placeholder">${categoryIcon(category.slug)}</span>`;
+    return `<tr>
+      <td>${image}</td>
+      <td><strong class="admin-table-primary">${esc(category.name)}</strong><small class="admin-table-subtext">${esc(category.slug)}</small></td>
+      <td><span class="admin-table-description" title="${esc(category.description||'')}">${esc(category.description||'—')}</span></td>
+      <td><span class="admin-count-pill">${Number(category.productCount||0)}</span></td>
+      <td><span class="admin-status-pill ${category.active===false?'is-inactive':'is-active'}">${category.active===false?'Deleted':'Active'}</span></td>
+      <td><div class="admin-table-actions">${category.active===false ? `<button class="action-btn" data-restore-category="${esc(category.id)}">Restore</button>` : `<button class="action-btn" data-edit-category="${esc(category.id)}">Edit</button><button class="action-btn danger-btn" data-archive-category="${esc(category.id)}">Delete</button>`}</div></td>
+    </tr>`;
+  }).join('');
 }
 
 // ─── Payment methods ──────────────────────────────────────────────────────────
@@ -392,15 +580,35 @@ async function loadPaymentMethods() {
 
 async function loadStoreSettings() {
   const {settings} = await api('/admin/settings');
-  const form = $('#storeSettingsForm');
-  if (!form) return;
-  for (const [key, value] of Object.entries(settings)) {
-    const input = form.elements.namedItem(key);
-    if (input) input.value = value ?? '';
+  for (const form of [$('#storeSettingsForm'), $('#storeProfileForm')]) {
+    if (!form) continue;
+    for (const [key, value] of Object.entries(settings)) {
+      const input = form.elements.namedItem(key);
+      if (input) input.value = value ?? '';
+    }
   }
 }
 
 function applyStoreConfig(config) {
+  productImageUploadsEnabled = config?.productImageUploadsEnabled === true;
+  const uploadInput = $('#productImageFile');
+  if (uploadInput) uploadInput.disabled = !productImageUploadsEnabled;
+  const categoryUploadInput = $('#categoryImageFile');
+  if (categoryUploadInput) categoryUploadInput.disabled = !productImageUploadsEnabled;
+  document.querySelectorAll('[data-product-image-file]').forEach(input => { input.disabled = !productImageUploadsEnabled; });
+  document.querySelectorAll('[data-trigger-product-image]').forEach(button => { button.disabled = !productImageUploadsEnabled; });
+  const uploadNotice = $('#productUploadConfigNotice');
+  if (uploadNotice) {
+    uploadNotice.hidden = productImageUploadsEnabled;
+    uploadNotice.textContent = 'Photo uploads are unavailable until Cloudinary is configured. Add CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET to the server .env, then restart the app.';
+  }
+  const categoryUploadNotice = $('#categoryUploadConfigNotice');
+  if (categoryUploadNotice) {
+    categoryUploadNotice.hidden = productImageUploadsEnabled;
+    categoryUploadNotice.textContent = 'Category photo uploads are unavailable until Cloudinary is configured. Add the CLOUDINARY settings to the server .env, then restart the app.';
+  }
+  const uploadStatus = $('#productImageUploadStatus');
+  if (uploadStatus && !productImageUploadsEnabled) uploadStatus.textContent = 'Uploads are disabled until durable image storage is configured.';
   if (!config) return;
   const address = $('#sidebarStoreAddress'), phone = $('#sidebarStorePhone');
   const number  = String(config.storePhone || '');
@@ -413,19 +621,24 @@ function applyStoreConfig(config) {
 async function initAdmin() {
   const adminLockedEl   = $('#adminLocked');
   const adminContentEl  = $('#adminContent');
-  const mfaSetupEl = $('#adminMfaSetup');
   if (!adminLockedEl || !adminContentEl) return;
+  document.body.classList.add('admin-login-mode');
   try {
     const {user} = await api('/me');
     if (user.role !== 'ADMIN') throw Error('Administrator access required');
     adminLockedEl.hidden = true;
-    if (!user.mfaEnabled) {
-      adminContentEl.hidden = true;
-      if (mfaSetupEl) mfaSetupEl.hidden = false;
-      return;
-    }
+    adminMfaEnabled = Boolean(user.mfaEnabled);
+    const mfaStatus = $('#adminMfaStatus');
+    const mfaButton = $('#rotateMfaSetup');
+    if (mfaStatus) mfaStatus.textContent = adminMfaEnabled
+      ? 'Authenticator verification is enabled for this account.'
+      : 'Authenticator verification is optional and currently off.';
+    if (mfaButton) mfaButton.textContent = adminMfaEnabled
+      ? 'Replace authenticator and recovery codes'
+      : 'Set up authenticator';
     $('#adminGreeting').textContent = user.name.split(' ')[0];
     adminContentEl.hidden = false;
+    document.body.classList.remove('admin-login-mode');
     const results = await Promise.all([
       loadStats(), loadAdminOrders(), loadProducts(), loadCategories(),
       loadPaymentMethods(),
@@ -434,9 +647,55 @@ async function initAdmin() {
       loadEmailOutbox(),
     ]);
     applyStoreConfig(results[6]);
-  } catch (error) {
+  } catch {
+    document.body.classList.add('admin-login-mode');
+    adminContentEl.hidden = true;
     adminLockedEl.hidden = false;
-    adminLockedEl.insertAdjacentHTML('beforeend', errorBox(error));
+    const loginError = $('#adminLoginError');
+    if (loginError) {
+      loginError.textContent = '';
+      loginError.hidden = true;
+    }
+  }
+}
+
+async function loginAdmin(form) {
+  const error = $('#adminLoginError');
+  const mfaField = $('#adminLoginMfaField');
+  const mfaInput = form.elements.namedItem('totpCode');
+  const submit = form.querySelector('button[type="submit"]');
+  const submitMarkup = submit?.innerHTML || '';
+  if (submit?.disabled) return;
+  if (error) error.hidden = true;
+  if (submit) { submit.disabled = true; submit.innerHTML = '<span>Signing in…</span><span aria-hidden="true">…</span>'; }
+  try {
+    const payload = Object.fromEntries(new FormData(form));
+    payload.email = String(payload.email || '').trim();
+    payload.totpCode = String(payload.totpCode || '').trim().toUpperCase();
+    const result = await api('/auth/login', { method: 'POST', body: JSON.stringify(payload) });
+    if (result.mfaRequired) {
+      if (mfaField) mfaField.hidden = false;
+      if (mfaInput) { mfaInput.required = true; mfaInput.focus(); }
+      if (error) {
+        error.textContent = 'Enter the authenticator code or an unused recovery code to continue.';
+        error.hidden = false;
+      }
+      return;
+    }
+    if (result.user?.role !== 'ADMIN') {
+      throw new Error('This account does not have administrator access.');
+    }
+    form.reset();
+    if (mfaField) mfaField.hidden = true;
+    if (mfaInput) mfaInput.required = false;
+    await initAdmin();
+  } catch (loginError) {
+    if (error) {
+      error.textContent = loginError.message || 'Administrator sign-in failed. Please try again.';
+      error.hidden = false;
+    }
+  } finally {
+    if (submit) { submit.disabled = false; submit.innerHTML = submitMarkup; }
   }
 }
 
@@ -446,6 +705,11 @@ document.addEventListener('click', async (event) => {
   const button = event.target.closest('button,a[data-cancel-order]');
   if (!button) return;
   try {
+    if (button.hasAttribute('data-open-product-dialog')) { openProductEditor(); return; }
+    if (button.hasAttribute('data-open-category-dialog')) { openCategoryEditor(); return; }
+    if (button.hasAttribute('data-close-dialog')) { button.closest('dialog')?.close(); return; }
+    if (button.dataset.editProduct) { openProductEditor(button.dataset.editProduct); return; }
+    if (button.dataset.editCategory) { openCategoryEditor(button.dataset.editCategory); return; }
     if (button.id === 'loadMoreCustomerOrders') {
       await loadCustomerOrders(true);
       return;
@@ -466,19 +730,13 @@ document.addEventListener('click', async (event) => {
       location.href = '/';
       return;
     }
-    if (button.id === 'beginMfaSetup') {
-      const result = await api('/admin/mfa/setup', {method:'POST', body:JSON.stringify({})});
-      $('#mfaSecret').textContent = result.secret;
-      $('#mfaRecoveryCodes').textContent = (result.recoveryCodes || []).join('\n');
-      $('#mfaSecretBox').hidden = false;
-      button.disabled = true;
-      notify('Add the secret to your authenticator app');
-      return;
-    }
     if (button.id === 'rotateMfaSetup') {
-      const currentCode = prompt('Enter a current authenticator code or unused recovery code to replace MFA:');
-      if (!currentCode) return;
-      const result = await api('/admin/mfa/setup', {method:'POST', body:JSON.stringify({currentCode:currentCode.trim()})});
+      let currentCode = '';
+      if (adminMfaEnabled) {
+        currentCode = prompt('Enter a current authenticator code or unused recovery code to replace MFA:') || '';
+        if (!currentCode) return;
+      }
+      const result = await api('/admin/mfa/setup', {method:'POST', body:JSON.stringify(currentCode ? {currentCode:currentCode.trim()} : {})});
       $('#mfaRotationSecret').textContent = result.secret;
       $('#mfaRotationRecoveryCodes').textContent = (result.recoveryCodes || []).join('\n');
       $('#mfaRotationBox').hidden = false;
@@ -507,6 +765,15 @@ document.addEventListener('click', async (event) => {
       return;
     }
 
+    if (button.dataset.confirmOrder) {
+      const id = button.dataset.confirmOrder;
+      if (!confirm('Accept this order and notify the customer? Payment will remain pending until you confirm it separately.')) return;
+      await api(`/admin/orders/${id}/fulfillment`, {method:'PATCH', body:JSON.stringify({status:'CONFIRMED'})});
+      await loadAdminOrders();
+      notify('Order accepted; payment remains a separate confirmation');
+      return;
+    }
+
     if (button.dataset.updateStatus) {
       const id     = button.dataset.updateStatus;
       const select = document.querySelector(`[data-order-select="${id}"]`);
@@ -518,11 +785,11 @@ document.addEventListener('click', async (event) => {
     }
 
     if (button.dataset.cancelOrder) {
-      if (!confirm('Cancel this order and return items to stock?')) return;
+      if (!confirm('Cancel this unpaid order?')) return;
       const reason = prompt('Reason for cancellation (optional):') || '';
       await api(`/admin/orders/${button.dataset.cancelOrder}/cancel`,{method:'POST',body:JSON.stringify({reason})});
       await Promise.all([loadAdminOrders(), loadStats(), loadProducts()]);
-      notify('Order cancelled and stock restored');
+      notify('Order cancelled');
       return;
     }
 
@@ -539,7 +806,7 @@ document.addEventListener('click', async (event) => {
       if (paymentRef === null) return;
       const reason = prompt('Reason for this refund:');
       if (reason === null) return;
-      if (!confirm(`Record that ${fmt(amount)} has already been refunded? This records the refund and does not send money or change inventory.`)) return;
+      if (!confirm(`Record that ${fmt(amount)} has already been refunded? This records the refund and does not send money.`)) return;
       await api(`/admin/orders/${button.dataset.refundOrder}/refund`, {method:'POST', body:JSON.stringify({amount, paymentRef, reason})});
       await Promise.all([loadAdminOrders(), loadStats()]);
       notify('Refund recorded in the order ledger');
@@ -553,51 +820,51 @@ document.addEventListener('click', async (event) => {
       return;
     }
 
-    if (button.dataset.saveProduct) {
-      const row = document.querySelector(`[data-product-row="${button.dataset.saveProduct}"]`);
-      const payload = Object.fromEntries([...row.querySelectorAll('[data-field]')].map(input =>
-        [input.dataset.field, ['name','categorySlug','imageUrl','imagePublicId','images'].includes(input.dataset.field) ? input.value.trim() : Number(input.value)]));
-      payload.images = JSON.parse(payload.images || '[]');
-      const result = await api(`/admin/products/${button.dataset.saveProduct}`,{method:'PATCH',body:JSON.stringify(payload)});
-      await Promise.all([loadProducts(), loadStats()]);
-      notify(result.imageCleanupFailed ? 'Product saved, but Cloudinary could not remove the old photo.' : 'Product saved');
+    if (button.dataset.archiveOrder) {
+      if (!confirm('Delete this order from the active admin list? Its invoice, customer history, payment details and audit records will be kept.')) return;
+      await api(`/admin/orders/${button.dataset.archiveOrder}`, {method:'DELETE', body:JSON.stringify({})});
+      await Promise.all([loadAdminOrders(), loadStats()]);
+      notify('Order removed from the active list');
       return;
     }
-    if (button.dataset.adjustStock) {
-      const row = document.querySelector(`[data-product-row="${button.dataset.adjustStock}"]`);
-      const delta = Number(row.querySelector('[data-stock-delta]').value);
-      const reason = prompt('Why are you changing this stock count? (e.g. received shipment, damaged item, stock count correction)');
-      if (reason === null) return;
-      await api(`/admin/products/${button.dataset.adjustStock}/stock`, {method:'POST', body:JSON.stringify({delta,reason})});
-      await Promise.all([loadProducts(), loadStats()]);
-      notify('Inventory adjustment saved');
+    if (button.dataset.restoreOrder) {
+      await api(`/admin/orders/${button.dataset.restoreOrder}/restore`, {method:'POST', body:JSON.stringify({})});
+      await loadAdminOrders();
+      notify('Order restored to the active list');
       return;
     }
-    if (button.dataset.stockHistory) {
-      const {adjustments} = await api(`/admin/products/${button.dataset.stockHistory}/inventory-adjustments`);
-      const text = adjustments.map(entry => `${formatDate(entry.createdAt)} · ${entry.delta>0?'+':''}${entry.delta} (${entry.previousStock} → ${entry.newStock}) · ${entry.reason}`).join('\n');
-      alert(text || 'No stock adjustments recorded for this product.');
-      return;
-    }
-    if (button.dataset.saveCategory) {
-      const input = document.querySelector(`[data-category-name="${button.dataset.saveCategory}"]`);
-      await api(`/admin/categories/${button.dataset.saveCategory}`, {method:'PATCH', body:JSON.stringify({name:input.value.trim()})});
-      await Promise.all([loadCategories(), loadProducts()]);
-      notify('Category updated');
-      return;
-    }
+
     if (button.dataset.archiveCategory) {
-      if (!confirm('Archive this category? It must have no active products.')) return;
+      if (!confirm('Delete this category from the active catalog? It must have no available products. Historical orders are preserved.')) return;
       await api(`/admin/categories/${button.dataset.archiveCategory}`, {method:'DELETE'});
       await Promise.all([loadCategories(), loadProducts()]);
-      notify('Category archived');
+      notify('Category deleted from the active catalog');
+      return;
+    }
+    if (button.dataset.restoreCategory) {
+      await api(`/admin/categories/${button.dataset.restoreCategory}/restore`, {method:'POST', body:JSON.stringify({})});
+      await Promise.all([loadCategories(), loadProducts()]);
+      notify('Category restored');
       return;
     }
     if (button.dataset.hideProduct) {
-      if (!confirm('Hide this product from shoppers?')) return;
+      if (!confirm('Delete this product from the active catalog? Existing orders and invoices keep their product details.')) return;
       await api(`/admin/products/${button.dataset.hideProduct}`,{method:'DELETE'});
       await Promise.all([loadProducts(), loadStats()]);
-      notify('Product hidden');
+      notify('Product deleted from the active catalog');
+      return;
+    }
+    if (button.dataset.restoreProduct) {
+      await api(`/admin/products/${button.dataset.restoreProduct}/restore`, {method:'POST', body:JSON.stringify({})});
+      await Promise.all([loadProducts(), loadStats()]);
+      notify('Product restored to the catalog');
+      return;
+    }
+    if (button.dataset.toggleProduct) {
+      const active = button.dataset.active === '1';
+      await api(`/admin/products/${button.dataset.toggleProduct}`, {method:'PATCH', body:JSON.stringify({active:!active})});
+      await Promise.all([loadProducts(), loadStats()]);
+      notify(active ? 'Product marked unavailable' : 'Product marked available');
       return;
     }
 
@@ -624,7 +891,8 @@ document.addEventListener('input', (event) => {
     clearTimeout(orderSearchTimer);
     orderSearchTimer = setTimeout(() => { void loadAdminOrders().catch(error => notify(error.message)); }, 300);
   }
-  if (event.target.id === 'productSearch' || event.target.id === 'inventoryStockFilter') renderProducts();
+  if (event.target.id === 'productSearch') renderProducts();
+  if (event.target.id === 'categorySearch') renderCategories();
   if (event.target.matches('.admin-product-image-url')) {
     const row = event.target.closest('[data-product-row]');
     const preview = row?.querySelector('[data-product-preview]');
@@ -642,15 +910,21 @@ document.addEventListener('input', (event) => {
 
 $('#orderStatusFilter')?.addEventListener('change', () => { void loadAdminOrders().catch(error => notify(error.message)); });
 $('#orderPaymentFilter')?.addEventListener('change', () => { void loadAdminOrders().catch(error => notify(error.message)); });
-$('#inventoryStockFilter')?.addEventListener('change', renderProducts);
+$('#orderVisibilityFilter')?.addEventListener('change', () => { void loadAdminOrders().catch(error => notify(error.message)); });
 
 document.addEventListener('submit', async (event) => {
   event.preventDefault();
   const form = event.target;
-  if (!['createProduct','createCategory','createPaymentMethod','storeSettingsForm','verifyMfaSetup','verifyMfaRotation'].includes(form.id) && !form.classList.contains('confirm-payment-form') && !form.classList.contains('edit-payment-method-form') && !form.classList.contains('return-review-form') && !form.classList.contains('return-receive-form') && !form.classList.contains('customer-return-form')) return;
-  const payload = Object.fromEntries(new FormData(form));
+  if (form.id === 'adminLoginForm') {
+    await loginAdmin(form);
+    return;
+  }
+  if (!['createProduct','createCategory','createPaymentMethod','storeSettingsForm','storeProfileForm','verifyMfaRotation'].includes(form.id) && !form.classList.contains('confirm-payment-form') && !form.classList.contains('edit-payment-method-form') && !form.classList.contains('return-review-form') && !form.classList.contains('return-receive-form') && !form.classList.contains('customer-return-form')) return;
 
   try {
+    if (form.id === 'createProduct') await productImageUploadPromise;
+    if (form.id === 'createCategory') await categoryImageUploadPromise;
+    const payload = Object.fromEntries(new FormData(form));
     if (form.classList.contains('return-review-form')) {
       await api(`/admin/orders/${form.dataset.orderId}/returns/${form.dataset.requestId}/review`, {
         method:'POST', body:JSON.stringify({ decision:form.dataset.decision, reviewNote:payload.reviewNote || '' }),
@@ -663,13 +937,13 @@ document.addEventListener('submit', async (event) => {
       const items = [...form.querySelectorAll('[data-return-received]')].map(input => ({
         productId:input.dataset.returnReceived,
         quantityReceived:Number(input.value),
-        restockQuantity:Number(form.querySelector(`[data-return-restock="${CSS.escape(input.dataset.returnReceived)}"]`)?.value || 0),
+        restockQuantity:0,
       }));
       await api(`/admin/orders/${form.dataset.orderId}/returns/${form.dataset.requestId}/receive`, {
         method:'POST', body:JSON.stringify({ items, note:payload.note || '' }),
       });
       await Promise.all([loadAdminOrders(), loadProducts(), loadStats()]);
-      notify('Returned goods recorded; eligible items were restocked');
+      notify('Return inspection saved');
       return;
     }
     if (form.classList.contains('customer-return-form')) {
@@ -689,17 +963,19 @@ document.addEventListener('submit', async (event) => {
       notify('Payment confirmed ✅');
       return;
     }
-    if (form.id === 'verifyMfaSetup' || form.id === 'verifyMfaRotation') {
+    if (form.id === 'verifyMfaRotation') {
       await api('/admin/mfa/verify', {method:'POST', body:JSON.stringify(payload)});
       notify('MFA saved. Sign in again with the new authenticator.');
       location.reload();
       return;
     }
-    if (form.id === 'storeSettingsForm') {
-      for (const key of ['deliveryFeeFlat','taxRatePercent','invoiceExpiryHours','returnWindowDays']) payload[key] = Number(payload[key]);
+    if (form.id === 'storeSettingsForm' || form.id === 'storeProfileForm') {
+      if (form.id === 'storeSettingsForm') {
+        for (const key of ['deliveryFeeFlat','taxRatePercent','invoiceExpiryHours','returnWindowDays']) payload[key] = Number(payload[key]);
+      }
       await api('/admin/settings', {method:'PATCH', body:JSON.stringify(payload)});
       await loadStoreSettings();
-      notify('Store settings saved');
+      notify(form.id === 'storeProfileForm' ? 'Store profile saved' : 'Checkout rules saved');
       return;
     }
     if (form.classList.contains('edit-payment-method-form')) {
@@ -709,28 +985,42 @@ document.addEventListener('submit', async (event) => {
       return;
     }
     if (form.id === 'createProduct') {
+      const productId = payload.productId;
+      delete payload.productId;
       payload.price    = Number(payload.price);
-      payload.stock    = Number(payload.stock);
       payload.featured = !!payload.featured;
+      payload.isSecondHand = !!form.elements.namedItem('isSecondHand').checked;
       payload.images = JSON.parse(payload.images || '[]');
-      await api('/admin/products',{method:'POST',body:JSON.stringify(payload)});
+      payload.variants = JSON.parse(payload.variants || '[]');
+      const result = productId
+        ? await api(`/admin/products/${productId}`,{method:'PATCH',body:JSON.stringify(payload)})
+        : await api('/admin/products',{method:'POST',body:JSON.stringify(payload)});
       await Promise.all([loadProducts(), loadStats()]);
-    } else if (form.id === 'createCategory') {
-      await api('/admin/categories',{method:'POST',body:JSON.stringify(payload)});
-      await Promise.all([loadCategories(), loadProducts()]);
-    } else if (form.id === 'createPaymentMethod') {
-      await api('/admin/payment-methods',{method:'POST',body:JSON.stringify(payload)});
-      await loadPaymentMethods();
-    }
-    form.reset();
-    if (form.id === 'createProduct') {
+      $('#productEditorDialog').close();
       $('#productImagePreview').hidden = true;
       $('#productImagePreview').removeAttribute('src');
       $('#productImageUploadStatus').textContent = '';
       $('#productImagePublicId').value = '';
       $('#productImages').value = '[]';
+      $('#productImageUrl').value = '';
       $('#productImageUrl').dataset.pendingImageUrl = '';
+      notify(result?.imageCleanupFailed ? 'Product saved, but Cloudinary could not remove the old photo.' : productId ? 'Product updated' : 'Product added to the catalog');
+      return;
+    } else if (form.id === 'createCategory') {
+      const categoryId = payload.categoryId;
+      delete payload.categoryId;
+      const result = categoryId
+        ? await api(`/admin/categories/${categoryId}`,{method:'PATCH',body:JSON.stringify(payload)})
+        : await api('/admin/categories',{method:'POST',body:JSON.stringify(payload)});
+      await Promise.all([loadCategories(), loadProducts()]);
+      $('#categoryEditorDialog').close();
+      notify(result?.imageCleanupFailed ? 'Category saved, but Cloudinary could not remove the old photo.' : categoryId ? 'Category updated' : 'Category added');
+      return;
+    } else if (form.id === 'createPaymentMethod') {
+      await api('/admin/payment-methods',{method:'POST',body:JSON.stringify(payload)});
+      await loadPaymentMethods();
     }
+    form.reset();
     notify('Saved successfully');
   } catch (error) { notify(error.message); }
 });
@@ -745,21 +1035,38 @@ let customerOrdersLoading = false;
 function renderCustomerOrders() {
   const content = $('#ordersContent');
   if (!content) return;
+  const pendingCount = customerOrders.filter(order => order.paymentStatus === 'PENDING').length;
+  const paidTotal = customerOrders.filter(order => order.paymentStatus === 'PAID')
+    .reduce((sum, order) => sum + Math.max(0, Number(order.total || 0) - Number(order.refundedAmount || 0)), 0);
+  $('#customerOrderCount').textContent = String(customerOrders.length);
+  $('#customerOrderPending').textContent = String(pendingCount);
+  $('#customerOrderSpend').textContent = fmt(paidTotal);
   const cards = customerOrders.map(order => {
     const snap = order.paymentMethodSnapshot || {};
-    const returnRequests = (order.returnRequests || []).map(request => `<div class="customer-return-status"><strong>Return ${esc(String(request.status || 'REQUESTED').replaceAll('_',' ').toLowerCase())}</strong><small>${esc(formatDate(request.requestedAt))} · ${esc(request.reason)}</small>${request.reviewNote ? `<p>${esc(request.reviewNote)}</p>` : ''}<ul>${(request.items || []).map(item => `<li>${esc(item.productName)} × ${Number(item.quantity)}${request.status === 'RECEIVED' ? ` · received ${Number(item.returnedQuantity || 0)} · restocked ${Number(item.restockedQuantity || 0)}` : ''}</li>`).join('')}</ul></div>`).join('');
+    const fulfillment = order.fulfillmentStatus || order.status || 'PLACED';
+    const payment = order.paymentStatus || 'PENDING';
+    const steps = ['PLACED', 'CONFIRMED', 'PACKING', 'OUT_FOR_DELIVERY', 'DELIVERED'];
+    const currentStep = steps.indexOf(fulfillment);
+    const progress = fulfillment === 'CANCELLED' ? `<div class="customer-order-cancelled">This order was cancelled${order.cancelReason ? ` · ${esc(order.cancelReason)}` : ''}</div>` : `<ol class="order-progress" aria-label="Order progress">${steps.map((step, index) => `<li class="${index < currentStep ? 'is-complete' : index === currentStep ? 'is-current' : ''}"><span>${index < currentStep ? '✓' : index + 1}</span><small>${step.replaceAll('_', ' ').toLowerCase()}</small></li>`).join('')}</ol>`;
+    const items = (order.items || []).map(item => {
+      const lineTotal = Number(item.unitPrice ?? item.unit_price ?? item.price ?? 0) * Number(item.quantity || 0);
+      const variant = item.variantValue || item.variantLabel || item.variant?.value || '';
+      return `<li><div><strong>${esc(item.productName || item.product_name)}</strong>${variant ? `<small>${esc(item.variantType || item.variant?.type || 'Option')}: ${esc(variant)}</small>` : ''}${item.isSecondHand ? '<span class="condition-badge">Pre-owned</span>' : ''}</div><span>${Number(item.quantity)} × ${fmt(item.unitPrice ?? item.unit_price ?? item.price ?? 0)}</span><strong>${fmt(lineTotal)}</strong></li>`;
+    }).join('');
+    const returnRequests = (order.returnRequests || []).map(request => `<div class="customer-return-status"><strong>Return ${esc(String(request.status || 'REQUESTED').replaceAll('_',' ').toLowerCase())}</strong><small>${esc(formatDate(request.requestedAt))} · ${esc(request.reason)}</small>${request.reviewNote ? `<p>${esc(request.reviewNote)}</p>` : ''}<ul>${(request.items || []).map(item => `<li>${esc(item.productName)} × ${Number(item.quantity)}${request.status === 'RECEIVED' ? ` · received ${Number(item.returnedQuantity || 0)}` : ''}</li>`).join('')}</ul></div>`).join('');
     const returnPolicy = order.returnPolicy || {};
     const returnForm = returnPolicy.canRequest ? `<details class="customer-return-details"><summary>Request a return</summary><p>Submit before ${esc(formatDate(returnPolicy.deadline))}. The store will review your request.</p><form class="customer-return-form" data-order-id="${esc(order.id)}"><label>Reason<textarea class="form-control" name="reason" minlength="5" maxlength="500" required placeholder="Tell us what happened and why you are requesting a return"></textarea></label><div class="customer-return-quantities">${(returnPolicy.remainingItems || []).map(item => `<label>${esc(item.productName)} · up to ${Number(item.availableQuantity)}<input class="form-control" data-return-customer-qty="${esc(item.productId)}" type="number" min="0" max="${Number(item.availableQuantity)}" value="0"></label>`).join('')}</div><button class="btn btn-subtle" type="submit">Send return request</button></form></details>` : '';
-    return `<article class="order-card">
-      <div class="order-title"><div><h3>${esc(order.invoiceNumber || 'Order #' + order.id.slice(0,8).toUpperCase())}</h3><div class="order-meta">${esc(formatDate(order.createdAt||order.created_at))} · ${esc(order.city)} · ${esc(order.phone)}</div></div>
-        <div style="text-align:right"><span class="pill ${esc(order.fulfillmentStatus||order.status)}">${esc((order.fulfillmentStatus||order.status||'').replaceAll('_',' '))}</span><span class="pill" style="background:#fff3cd;color:#856404;margin-left:4px">${esc(order.paymentStatus||'PENDING')}</span><div style="margin-top:7px;font:800 18px Outfit;color:#1552c4">${fmt(order.total)}</div></div></div>
-      <div class="order-products">${(order.items||[]).map(item => `${esc(item.productName||item.product_name)} × ${Number(item.quantity)} — ${fmt((item.unitPrice||item.unit_price)*item.quantity)}`).join('<br>')}<br><strong>Payment: ${esc(snap.label||'Invoice')}</strong>
-        ${order.paymentStatus==='PENDING'&&order.paymentDeadline?`<br><span style="color:#856404;font-size:.85rem">⏰ Pay by: ${esc(formatDate(order.paymentDeadline))}</span>`:''}
-        ${Number(order.refundedAmount||0)>0?`<br><strong>Refunded to date: ${fmt(order.refundedAmount)} · ${esc(order.refundStatus||'PARTIALLY_REFUNDED')}</strong>`:''}
-        ${order.paymentStatus==='PAID'?'<br>✅ Payment confirmed':''}</div>
+    const paymentMessage = payment === 'PENDING'
+      ? `<div class="order-payment-guidance"><strong>Payment is awaiting confirmation</strong><span>${fulfillment === 'PLACED' ? 'Use the payment instructions on your invoice. The store will confirm your order after reviewing it.' : 'Your order is accepted. Use the invoice instructions to pay; packing starts after the store confirms receipt.'}</span>${order.paymentDeadline ? `<small>Payment due ${esc(formatDate(order.paymentDeadline))}</small>` : ''}</div>`
+      : payment === 'PAID' ? '<div class="order-payment-guidance is-paid"><strong>✓ Payment confirmed</strong><span>Your order is ready to move through fulfillment.</span></div>'
+        : `<div class="order-payment-guidance"><strong>Payment ${esc(payment.toLowerCase().replaceAll('_',' '))}</strong></div>`;
+    return `<article class="customer-order-card">
+      <header class="customer-order-head"><div><span class="order-reference-label">ORDER REFERENCE</span><h3>${esc(order.invoiceNumber || 'Order #' + order.id.slice(0,8).toUpperCase())}</h3><p>${esc(formatDate(order.createdAt||order.created_at))} <span>·</span> ${esc(order.city || 'Kigali')} <span>·</span> ${esc(order.phone || '')}</p></div><div class="customer-order-total"><span>ORDER TOTAL</span><strong>${fmt(order.total)}</strong><div class="customer-order-badges"><span class="customer-status-badge ${esc(fulfillment)}">${esc(fulfillment.replaceAll('_',' '))}</span><span class="customer-status-badge payment ${esc(payment)}">${esc(payment.replaceAll('_',' '))}</span></div></div></header>
+      ${progress}
+      ${paymentMessage}
+      <details class="customer-order-details"><summary>Items and delivery details <span>${(order.items || []).length} item${(order.items || []).length === 1 ? '' : 's'}</span></summary><ul class="customer-order-items">${items || '<li>No item details available.</li>'}</ul><div class="customer-delivery-summary"><strong>Delivery to</strong><span>${esc(order.customerName || order.customer_name || '')} · ${esc(order.phone || '')}</span><span>${esc(order.address || '')}, ${esc(order.city || '')}</span><strong class="order-payment-method">Payment method · ${esc(snap.label || 'Invoice')}</strong>${Number(order.refundedAmount || 0) > 0 ? `<span class="order-refund-note">Refunded ${fmt(order.refundedAmount)} · ${esc(order.refundStatus || 'PARTIALLY_REFUNDED')}</span>` : ''}</div></details>
       ${returnRequests ? `<div class="customer-return-list">${returnRequests}</div>` : ''}${returnForm}
-      <a class="btn btn-subtle" href="/invoice?order=${esc(order.id)}" style="margin-top:.5rem;display:inline-block">View invoice →</a>
-      <a class="btn btn-subtle" href="/api/orders/${esc(order.id)}/invoice.pdf" target="_blank" style="margin-top:.5rem;margin-left:6px;display:inline-block">Download PDF ↓</a>
+      <footer class="customer-order-actions"><a class="btn btn-primary" href="/invoice?order=${esc(order.id)}">View invoice <span aria-hidden="true">→</span></a><a class="btn btn-subtle" href="/api/orders/${esc(order.id)}/invoice.pdf" target="_blank" rel="noopener">Download PDF ↓</a><a class="customer-order-help" href="tel:+250788651421">Need help?</a></footer>
     </article>`;
   }).join('');
   content.innerHTML = `${cards || (customerOrders.length ? '' : '<div class="empty-state">No orders yet. Start shopping!</div>')}${customerOrdersHasMore ? '<div class="products-load-more"><button id="loadMoreCustomerOrders" class="btn btn-subtle">Load older orders</button></div>' : ''}`;
@@ -779,6 +1086,7 @@ async function loadCustomerOrders(append = false) {
     if (!append) {
       const { user } = await api('/me');
       if (!user) throw new Error('Not signed in');
+      $('#ordersGreeting').textContent = `Hello ${String(user.name || 'there').split(/\s+/)[0]}, follow payment, preparation and delivery from checkout to your door.`;
     }
     const result = await api(`/me/orders?limit=20&skip=${customerOrdersSkip}`);
     const rows = result.orders || [];

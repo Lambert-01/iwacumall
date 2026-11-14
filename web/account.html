@@ -4,25 +4,31 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#1455D9"><meta name="description" content="Manage your IwacuMall profile, delivery addresses and signed-in devices.">
   <title>Your account | IwacuMall</title>
-  <link rel="icon" href="/assets/favicon.png"><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/overrides.css">
-  <script type="module" src="/account.js"></script>
+  <link rel="icon" href="/assets/favicon.png"><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/overrides.css?v=orders-account-redesign-20261114">
+  <script type="module" src="/account.js?v=orders-account-redesign-20261114"></script>
 </head>
 <body>
   <div class="announcement"><span class="announcement-dot"></span> Your IwacuMall account <span class="announcement-sep">•</span> Shop with confidence <span class="announcement-dot"></span></div>
   <header class="site-header"><div class="container header-row">
     <a class="brand" href="/" aria-label="IwacuMall home"><img src="/assets/favicon.png" alt=""><span>Iwacu<span class="brand-accent">Mall</span><span class="brand-suffix">.com</span></span></a>
-    <a class="btn btn-subtle" href="/orders">My orders</a><a class="btn btn-primary" href="/#products">Continue shopping</a>
+    <nav class="account-header-actions" aria-label="Account navigation"><a class="btn btn-subtle" href="/orders">My orders</a><a class="btn btn-primary" href="/#products">Continue shopping</a><button class="btn btn-subtle" type="button" id="logoutAccount">Sign out</button></nav>
   </div></header>
   <main class="container account-page">
-    <div class="section-label">ACCOUNT SETTINGS</div><h1>Make it yours</h1>
-    <p class="account-lead">Update your profile, save delivery details and review your active sessions.</p>
+    <section class="account-hero">
+      <div class="account-hero-copy"><div class="section-label">ACCOUNT CENTER</div><h1>Welcome, <span id="accountGreeting">there</span></h1><p class="account-lead">Your profile, delivery preferences and security, organized in one place.</p></div>
+      <div class="account-identity"><span class="account-avatar" id="accountAvatar">I</span><div><strong id="accountIdentityName">IwacuMall customer</strong><small id="accountIdentityEmail">Loading account…</small></div><span class="account-member-chip">CUSTOMER</span></div>
+      <div class="account-summary-stats"><div><strong id="accountAddressCount">0</strong><span>Saved addresses</span></div><div><strong id="accountSessionCount">0</strong><span>Active sessions</span></div><div><strong id="accountSignInType">—</strong><span>Sign-in method</span></div></div>
+    </section>
     <p id="accountStatus" class="account-status" role="status" aria-live="polite">Loading your account…</p>
     <div id="accountContent" hidden>
-      <section class="account-card">
+      <div class="account-workspace">
+        <nav class="account-section-nav" aria-label="Account settings sections"><span>YOUR SETTINGS</span><a href="#profileSection">◉ <span>Profile</span></a><a href="#addressesSection">⌖ <span>Delivery addresses</span></a><a href="#sessionsSection">▣ <span>Signed-in devices</span></a><a href="#securitySection">◇ <span>Security</span></a><a class="account-orders-nav" href="/orders">▤ <span>Order history</span><b>→</b></a></nav>
+        <div class="account-section-stack">
+      <section class="account-card" id="profileSection">
         <div class="admin-card-title"><span class="admin-card-icon">◉</span><div><h2>Profile</h2><p>Your name is shown on orders and invoices.</p></div></div>
         <form id="profileForm" class="account-form"><label>Full name<input id="profileName" name="name" class="form-control" minlength="2" maxlength="100" required></label><label>Email address<input id="profileEmail" class="form-control" readonly></label><button class="btn btn-primary" type="submit">Save profile</button></form>
       </section>
-      <section class="account-card">
+      <section class="account-card" id="addressesSection">
         <div class="admin-card-title"><span class="admin-card-icon">⌖</span><div><h2>Saved delivery addresses</h2><p>Choose a saved address at checkout.</p></div></div>
         <div id="savedAddresses" class="saved-address-list"></div>
         <form id="addressForm" class="account-form">
@@ -34,11 +40,11 @@
           <button class="btn btn-primary" type="submit">Save delivery address</button>
         </form>
       </section>
-      <section class="account-card">
+      <section class="account-card" id="sessionsSection">
         <div class="admin-card-title"><span class="admin-card-icon">▣</span><div><h2>Signed-in sessions</h2><p>Revoke a device you no longer use.</p></div></div>
         <div id="accountSessions" class="account-session-list"></div>
       </section>
-      <section class="account-card account-security-card">
+      <section class="account-card account-security-card" id="securitySection">
         <div class="admin-card-title"><span class="admin-card-icon">◇</span><div><h2>Security and account removal</h2><p>Password updates end your other active sessions.</p></div></div>
         <div id="passwordTools"></div>
         <form id="deleteAccountForm" class="account-delete-form">
@@ -49,6 +55,8 @@
           <div id="googleReauthPanel" hidden><p>Confirm the Google account linked to this profile to continue:</p><div id="googleReauthButton"></div></div>
         </form>
       </section>
+        </div>
+      </div>
     </div>
   </main>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>

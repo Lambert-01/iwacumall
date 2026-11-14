@@ -29,7 +29,7 @@ import { generateRobotsTxt, generateSitemapXml } from './seo.mjs';
 import { startEmailOutboxWorker } from './outbox.mjs';
 import { createTotpSecret, createRecoveryCodes, hashRecoveryCode, encryptSensitiveValue, encryptTotpSecret, decryptTotpSecret, verifyTotp, totpProvisioningUri } from './mfa.mjs';
 import { verifyGoogleIdToken } from './google-auth.mjs';
-import { uploadProductImage, deleteProductImage, cloudinaryUploadEnabled } from './media.mjs';
+import { uploadProductImage, deleteProductImage, uploadCategoryImage, deleteCategoryImage, cloudinaryUploadEnabled } from './media.mjs';
 
 // ─── Startup ──────────────────────────────────────────────────────────────────
 
@@ -155,18 +155,41 @@ async function sanitizeProduct(input, partial = false, existing = null) {
   for (const k of ['name', 'description', 'imageUrl', 'imagePublicId']) {
     if (input[k] !== undefined) fields[k] = cleanText(input[k], k === 'description' ? 1200 : 200);
   }
-  for (const k of ['price', 'stock']) {
+  for (const k of ['price']) {
     if (input[k] !== undefined) {
       const v = Number(input[k]);
       ensure(Number.isSafeInteger(v) && v >= 0 && v <= (k === 'price' ? 100_000_000 : 1_000_000), 400, `Invalid ${k}`);
       fields[k] = v;
     }
   }
-  for (const k of ['featured', 'active']) {
+  for (const k of ['featured', 'active', 'isSecondHand']) {
     if (input[k] !== undefined) {
       ensure(typeof input[k] === 'boolean', 400, `${k} must be true or false`);
       fields[k] = input[k];
     }
+  }
+  if (input.variants !== undefined) {
+    ensure(Array.isArray(input.variants) && input.variants.length <= 100, 400, 'A product can have up to 100 variants.');
+    const ids = new Set();
+    const combinations = new Set();
+    fields.variants = input.variants.map((rawVariant) => {
+      ensure(rawVariant && typeof rawVariant === 'object' && !Array.isArray(rawVariant), 400, 'Each product variant must be an object.');
+      const type = cleanText(rawVariant.type, 50);
+      const value = cleanText(rawVariant.value, 100);
+      ensure(rawVariant.price !== '' && rawVariant.price !== null && rawVariant.price !== undefined, 400, 'Each variant needs a price.');
+      const price = Number(rawVariant.price);
+      ensure(type.length >= 1 && value.length >= 1, 400, 'Each variant needs an option type and value.');
+      ensure(Number.isSafeInteger(price) && price >= 0 && price <= 100_000_000, 400, 'Each variant price must be a whole number from 0 to 100,000,000 RWF.');
+      const combination = `${type.toLocaleLowerCase()}\u0000${value.toLocaleLowerCase()}`;
+      ensure(!combinations.has(combination), 400, 'Variant type and value combinations must be unique.');
+      combinations.add(combination);
+      const requestedId = cleanText(rawVariant.id || '', 60);
+      const id = /^[a-zA-Z0-9_-]{8,60}$/.test(requestedId) ? requestedId : randomUUID();
+      ensure(!ids.has(id), 400, 'Variant IDs must be unique.');
+      ids.add(id);
+      return { id, type, value, price };
+    });
+    if (fields.variants.length) fields.price = Math.min(...fields.variants.map(variant => variant.price));
   }
   const validateImage = (rawImage) => {
     ensure(rawImage && typeof rawImage === 'object' && !Array.isArray(rawImage), 400, 'Each product photo must include an image URL.');
@@ -206,7 +229,11 @@ async function sanitizeProduct(input, partial = false, existing = null) {
     fields.imagePublicId = imagePublicId;
   }
   if (!partial) {
-    ensure(fields.name && fields.price !== undefined && fields.stock !== undefined, 400, 'Name, price and stock are required');
+    ensure(fields.name && fields.price !== undefined, 400, 'Name and price are required');
+    // New products use the admin's Available toggle instead of stock counts.
+    fields.stock = 0;
+    fields.trackInventory = false;
+    fields.isSecondHand = fields.isSecondHand === true;
   }
   if (input.categorySlug !== undefined) {
     const cat = await categories.findBySlug(slugify(cleanText(input.categorySlug, 80)));
@@ -306,10 +333,10 @@ async function api(req, res, url) {
   const method = req.method;
   const ip     = getClientIp(req);
 
-  // Admin data routes stay closed until the administrator completes MFA setup.
+  // Admin data routes require an administrator session. MFA remains an optional
+  // account setting; login still verifies a code when that account enabled it.
   if (!config.isTest && path.startsWith('/api/admin/') && !path.startsWith('/api/admin/mfa/')) {
-    const admin = await authUser(req, true);
-    ensure(admin.mfaEnabled, 403, 'Set up administrator two-factor authentication before using the dashboard.');
+    await authUser(req, true);
   }
 
   // ── Health / readiness ─────────────────────────────────────────────────────
@@ -333,6 +360,7 @@ async function api(req, res, url) {
       ...settings,
       currency:       config.currency,
       googleWebClientId: config.googleWebClientId || null,
+      productImageUploadsEnabled: cloudinaryUploadEnabled(),
       paymentMethods: methods.map(m => ({ id: m.id, label: m.label, type: m.type })),
       checkoutEnabled: methods.length > 0 && expiryConfigured && deliveryConfigured,
       checkoutBlockedReason: methods.length === 0
@@ -777,10 +805,20 @@ async function api(req, res, url) {
     const merged = new Map();
     for (const item of b.items) {
       const id  = cleanText(item.productId, 60);
+      const variantId = cleanText(item.variantId || '', 60);
       const qty = Number(item.quantity);
       ensure(id && Number.isSafeInteger(qty) && qty >= 1 && qty <= 100, 400, 'Invalid cart item');
-      merged.set(id, (merged.get(id) || 0) + qty);
-      ensure(merged.get(id) <= 100, 400, 'Maximum 100 per item');
+      const key = `${id}\u0000${variantId}`;
+      const current = merged.get(key) || { productId: id, variantId, quantity: 0 };
+      current.quantity += qty;
+      ensure(current.quantity <= 100, 400, 'Maximum 100 per item');
+      merged.set(key, current);
+    }
+    const productQuantities = new Map();
+    for (const item of merged.values()) {
+      const total = (productQuantities.get(item.productId) || 0) + item.quantity;
+      ensure(total <= 100, 400, 'Maximum 100 per product');
+      productQuantities.set(item.productId, total);
     }
 
     // Every order must carry a client-generated key so network retries cannot
@@ -791,16 +829,36 @@ async function api(req, res, url) {
       .update(JSON.stringify({
         customerName, phone, address, city, note,
         selectedMethodId,
-        items: Array.from(merged.entries()).sort((a,b) => a[0].localeCompare(b[0]))
+        items: Array.from(merged.values()).sort((a,b) => `${a.productId}:${a.variantId}`.localeCompare(`${b.productId}:${b.variantId}`))
       }))
       .digest('hex');
 
     // Fetch current prices from DB (never trust client-submitted prices)
     const lineItems = [];
-    for (const [productId, quantity] of merged) {
+    for (const { productId, variantId, quantity } of merged.values()) {
       const p = await products.findById(productId);
       ensure(p && p.active, 400, 'A product in your cart is unavailable');
-      lineItems.push({ productId, productName: p.name, unitPrice: p.price, quantity });
+      const variants = Array.isArray(p.variants) ? p.variants : [];
+      let selectedVariant = null;
+      if (variants.length) {
+        ensure(variantId, 400, `Choose an option for ${p.name} before placing your order.`);
+        selectedVariant = variants.find(variant => variant.id === variantId);
+        ensure(selectedVariant, 409, `The selected option for ${p.name} is no longer available. Please review your cart.`);
+      } else {
+        ensure(!variantId, 409, `${p.name} no longer has the selected option. Please review your cart.`);
+      }
+      const variantLabel = selectedVariant ? `${selectedVariant.type}: ${selectedVariant.value}` : '';
+      lineItems.push({
+        productId,
+        variantId: selectedVariant?.id || '',
+        variantType: selectedVariant?.type || '',
+        variantValue: selectedVariant?.value || '',
+        productName: variantLabel ? `${p.name} · ${variantLabel}` : p.name,
+        unitPrice: selectedVariant ? selectedVariant.price : p.price,
+        quantity,
+        trackInventory: p.trackInventory === true,
+        isSecondHand: p.isSecondHand === true,
+      });
     }
 
     const subtotal = lineItems.reduce((s, i) => s + i.unitPrice * i.quantity, 0);
@@ -916,6 +974,7 @@ async function api(req, res, url) {
     const status        = url.searchParams.get('status') || '';
     const paymentStatus = url.searchParams.get('paymentStatus') || '';
     const search        = cleanText(url.searchParams.get('search') || '', 100);
+    const includeArchived = url.searchParams.get('includeArchived') === 'true';
     const rawLimit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : Number.NaN;
     const rawSkip = url.searchParams.has('skip') ? Number(url.searchParams.get('skip')) : Number.NaN;
     const limit  = Number.isSafeInteger(rawLimit) ? Math.min(200, Math.max(1, rawLimit)) : 100;
@@ -925,8 +984,31 @@ async function api(req, res, url) {
       status:        status        || undefined,
       paymentStatus: paymentStatus || undefined,
       search:        search        || undefined,
+      includeArchived,
     });
     return json(res, 200, { orders: result, hasMore: result.length === limit, openCount: await orders.countOpen() });
+  }
+
+  // Hiding an order from the active admin queue preserves customer history, invoices and audit data.
+  const restoreAdminOrder = path.match(/^\/api\/admin\/orders\/([a-zA-Z0-9-]+)\/restore$/);
+  if (restoreAdminOrder && method === 'POST') {
+    const admin = await authUser(req, true);
+    verifyCsrf(req);
+    const orderId = restoreAdminOrder[1];
+    ensure(await orders.findById(orderId), 404, 'Order not found');
+    const restored = await orders.restoreAdminArchive({ orderId, adminId: admin.id });
+    ensure(restored, 409, 'Order is already in the active order list.');
+    return json(res, 200, { ok: true });
+  }
+  const archiveAdminOrder = path.match(/^\/api\/admin\/orders\/([a-zA-Z0-9-]+)$/);
+  if (archiveAdminOrder && method === 'DELETE') {
+    const admin = await authUser(req, true);
+    verifyCsrf(req);
+    const orderId = archiveAdminOrder[1];
+    ensure(await orders.findById(orderId), 404, 'Order not found');
+    const archived = await orders.archiveForAdmin({ orderId, adminId: admin.id });
+    ensure(archived, 409, 'Order is already removed from the active order list.');
+    return json(res, 200, { ok: true });
   }
 
   // ── Admin: confirm payment ─────────────────────────────────────────────────
@@ -1006,12 +1088,12 @@ async function api(req, res, url) {
     ensure(allowed.includes(status), 400, 'Invalid fulfillment status');
     const order = await orders.findById(orderId);
     ensure(order, 404, 'Order not found');
-    // Fulfillment can only advance if payment is PAID (except CANCELLED which uses /cancel)
+    // Initial order acceptance is independent from payment; packing and delivery require confirmed payment.
     if (status === 'DELIVERED') {
       ensure(order.paymentStatus === 'PAID', 409, 'Cannot mark delivered — payment not confirmed');
     }
     const changed = await orders.updateFulfillment({ orderId, adminId: admin.id, fulfillmentStatus: status });
-    ensure(changed, 409, 'Fulfillment status must move forward on a paid order');
+    ensure(changed, 409, 'Order status could not move forward. Confirm payment before packing or delivery, and choose the next status in the sequence.');
     return json(res, 200, { ok: true, fulfillmentStatus: status });
   }
 
@@ -1029,6 +1111,15 @@ async function api(req, res, url) {
     ensure(cloudinaryUploadEnabled(), 503, 'Product image uploads need Cloudinary storage configured by the store owner.');
     const { dataUrl } = await bodyJson(req, 12 * 1024 * 1024);
     const image = await uploadProductImage(dataUrl);
+    return json(res, 201, { imageUrl: image.secureUrl, publicId: image.publicId });
+  }
+
+  if (path === '/api/admin/uploads/category-image' && method === 'POST') {
+    await authUser(req, true);
+    verifyCsrf(req);
+    ensure(cloudinaryUploadEnabled(), 503, 'Category image uploads need Cloudinary storage configured by the store owner.');
+    const { dataUrl } = await bodyJson(req, 12 * 1024 * 1024);
+    const image = await uploadCategoryImage(dataUrl);
     return json(res, 201, { imageUrl: image.secureUrl, publicId: image.publicId });
   }
 
@@ -1061,40 +1152,36 @@ async function api(req, res, url) {
     return json(res, 201, { id, slug });
   }
 
-  if (/^\/api\/admin\/products\/[a-zA-Z0-9-]+\/stock$/.test(path) && method === 'POST') {
+  const restoreAdminProduct = path.match(/^\/api\/admin\/products\/([a-zA-Z0-9-]+)\/restore$/);
+  if (restoreAdminProduct && method === 'POST') {
     const admin = await authUser(req, true);
     verifyCsrf(req);
-    const productId = path.split('/')[4];
-    const body = await bodyJson(req);
-    const delta = Number(body.delta);
-    const reason = cleanText(body.reason, 300);
-    ensure(Number.isSafeInteger(delta) && delta !== 0 && Math.abs(delta) <= 1_000_000, 400, 'Enter a non-zero whole-number stock adjustment.');
-    ensure(reason.length >= 3, 400, 'Enter a short reason for the stock adjustment.');
-    const adjustment = await products.adjustStock({ productId, adminId: admin.id, delta, reason });
-    return json(res, 200, { adjustment });
-  }
-
-  const inventoryHistory = path.match(/^\/api\/admin\/products\/([a-zA-Z0-9-]+)\/inventory-adjustments$/);
-  if (inventoryHistory && method === 'GET') {
-    await authUser(req, true);
-    const history = await products.listAdjustments(inventoryHistory[1], Number(url.searchParams.get('limit')) || 50);
-    return json(res, 200, { adjustments: history });
+    const id = restoreAdminProduct[1];
+    const existing = await products.findById(id);
+    ensure(existing, 404, 'Product not found');
+    const restored = await products.restore(id);
+    ensure(restored.modifiedCount === 1, 409, 'Product is not deleted or has already been restored.');
+    await auditLog.record({ action: 'PRODUCT_RESTORED', adminId: admin.id, productId: id, detail: existing.name });
+    return json(res, 200, { ok: true });
   }
 
   if (/^\/api\/admin\/products\/[a-zA-Z0-9-]+$/.test(path)) {
-    await authUser(req, true);
+    const admin = await authUser(req, true);
     const id = path.split('/').pop();
     const existing = await products.findById(id);
     ensure(existing, 404, 'Product not found');
     if (method === 'DELETE') {
       verifyCsrf(req);
-      await products.softDelete(id);
+      const deleted = await products.softDelete(id);
+      ensure(deleted.modifiedCount === 1, 409, 'Product is already deleted.');
+      await auditLog.record({ action: 'PRODUCT_DELETED', adminId: admin.id, productId: id, detail: existing.name });
       return json(res, 200, { ok: true });
     }
     if (method === 'PATCH') {
       verifyCsrf(req);
       const body = await bodyJson(req);
-      ensure(body.stock === undefined, 400, 'Use the stock adjustment action to change inventory.');
+      ensure(body.stock === undefined, 400, 'Product stock is not managed here. Use the availability toggle.');
+      ensure(!(existing.deletedAt && body.active !== undefined), 409, 'Restore this product before changing availability.');
       if (typeof body.categorySlug === 'string' && slugify(cleanText(body.categorySlug, 80)) === existing.categorySlug) {
         delete body.categorySlug; // Let an existing product remain in its archived category while other fields are edited.
       }
@@ -1131,21 +1218,50 @@ async function api(req, res, url) {
   // ── Admin: categories ──────────────────────────────────────────────────────
   if (path === '/api/admin/categories' && method === 'GET') {
     await authUser(req, true);
-    return json(res, 200, { categories: await categories.list({ includeArchived: true }) });
+    const items = await categories.list({ includeArchived: true });
+    const enriched = await Promise.all(items.map(async category => ({
+      ...category,
+      productCount: await products.countByCategory(category.id, category.slug),
+    })));
+    return json(res, 200, { categories: enriched });
   }
 
   if (path === '/api/admin/categories' && method === 'POST') {
     await authUser(req, true);
     verifyCsrf(req);
-    const { name: rawName } = await bodyJson(req);
+    const body = await bodyJson(req);
+    const { name: rawName } = body;
     const name = cleanText(rawName, 80);
     const slug = slugify(name);
     ensure(name.length >= 2 && slug, 400, 'Enter a valid category name');
     const existing = await categories.findBySlug(slug);
     ensure(!existing, 409, 'Category already exists');
     const id = randomUUID();
-    await categories.create({ id, name, slug });
-    return json(res, 201, { id, name, slug });
+    const description = cleanText(body.description || '', 500);
+    const imageUrl = cleanText(body.imageUrl || '', 1000);
+    const imagePublicId = cleanText(body.imagePublicId || '', 200);
+    if (imageUrl) ensure(/^https:\/\//.test(imageUrl), 400, 'Category image must be an HTTPS URL.');
+    if (imagePublicId) {
+      const expectedCloudPrefix = `https://res.cloudinary.com/${config.cloudinaryCloudName}/image/upload/`;
+      const imagePath = `/iwacumall/categories/${imagePublicId.split('/').pop()}.`;
+      ensure(cloudinaryUploadEnabled() && /^iwacumall\/categories\/[0-9a-f-]{36}$/i.test(imagePublicId) && imageUrl.startsWith(expectedCloudPrefix) && imageUrl.includes(imagePath), 400, 'Uploaded image ID must match its Cloudinary category image URL.');
+    }
+    await categories.create({ id, name, slug, description, imageUrl, imagePublicId });
+    return json(res, 201, { id, name, slug, description, imageUrl, imagePublicId });
+  }
+
+  const restoreAdminCategory = path.match(/^\/api\/admin\/categories\/([a-zA-Z0-9-]+)\/restore$/);
+  if (restoreAdminCategory && method === 'POST') {
+    const admin = await authUser(req, true);
+    verifyCsrf(req);
+    const id = restoreAdminCategory[1];
+    const category = await categories.findById(id);
+    ensure(category, 404, 'Category not found.');
+    ensure(category.active === false, 409, 'Category is already active.');
+    const restored = await categories.restore(id);
+    ensure(restored.modifiedCount === 1, 409, 'Category could not be restored. Refresh and try again.');
+    await auditLog.record({ action: 'CATEGORY_RESTORED', adminId: admin.id, detail: category.slug });
+    return json(res, 200, { ok: true });
   }
 
   const adminCategory = path.match(/^\/api\/admin\/categories\/([a-zA-Z0-9-]+)$/);
@@ -1156,14 +1272,39 @@ async function api(req, res, url) {
     if (method === 'PATCH') {
       verifyCsrf(req);
       ensure(category.active !== false, 409, 'Archived categories cannot be edited.');
-      const { name: rawName } = await bodyJson(req);
-      const name = cleanText(rawName, 80);
-      ensure(name.length >= 2, 400, 'Enter a category name with at least two characters.');
-      const duplicate = await categories.findByName(name);
-      ensure(!duplicate || duplicate.id === category.id, 409, 'A category with that name already exists.');
-      await categories.rename(category.id, name);
-      await auditLog.record({ action: 'CATEGORY_RENAMED', adminId: admin.id, detail: `${category.name} → ${name}` });
-      return json(res, 200, { ok: true, name });
+      const body = await bodyJson(req);
+      const fields = {};
+      if (body.name !== undefined) {
+        fields.name = cleanText(body.name, 80);
+        ensure(fields.name.length >= 2, 400, 'Enter a category name with at least two characters.');
+        const duplicate = await categories.findByName(fields.name);
+        ensure(!duplicate || duplicate.id === category.id, 409, 'A category with that name already exists.');
+      }
+      if (body.description !== undefined) fields.description = cleanText(body.description, 500);
+      if (body.imageUrl !== undefined || body.imagePublicId !== undefined) {
+        fields.imageUrl = cleanText(body.imageUrl || '', 1000);
+        fields.imagePublicId = cleanText(body.imagePublicId || '', 200);
+        if (fields.imageUrl) ensure(/^https:\/\//.test(fields.imageUrl), 400, 'Category image must be an HTTPS URL.');
+        if (fields.imagePublicId) {
+          const expectedCloudPrefix = `https://res.cloudinary.com/${config.cloudinaryCloudName}/image/upload/`;
+          const imagePath = `/iwacumall/categories/${fields.imagePublicId.split('/').pop()}.`;
+          ensure(cloudinaryUploadEnabled() && /^iwacumall\/categories\/[0-9a-f-]{36}$/i.test(fields.imagePublicId) && fields.imageUrl.startsWith(expectedCloudPrefix) && fields.imageUrl.includes(imagePath), 400, 'Uploaded image ID must match its Cloudinary category image URL.');
+        }
+      }
+      ensure(Object.keys(fields).length > 0, 400, 'No valid category changes were provided.');
+      const previousImageId = category.imagePublicId || '';
+      await categories.update(category.id, fields);
+      let imageCleanupFailed = false;
+      if (fields.imagePublicId !== undefined && previousImageId && fields.imagePublicId !== previousImageId) {
+        try {
+          if (!await categories.countImageReferences(previousImageId, category.id)) await deleteCategoryImage(previousImageId);
+        } catch (error) {
+          imageCleanupFailed = true;
+          console.warn('[media] Previous category image cleanup failed:', error?.code || 'CLEANUP_ERROR');
+        }
+      }
+      await auditLog.record({ action: fields.name ? 'CATEGORY_UPDATED' : 'CATEGORY_IMAGE_UPDATED', adminId: admin.id, detail: category.slug });
+      return json(res, 200, { ok: true, imageCleanupFailed });
     }
     if (method === 'DELETE') {
       verifyCsrf(req);
@@ -1354,6 +1495,7 @@ async function serveStatic(req, res, url) {
     const image = product.imageUrl || '/assets/products/fallback.png';
     const imageUrl = /^https:\/\//i.test(image) ? image : new URL(image, baseUrl).href;
     const description = product.description || `${product.name} is available at IwacuMall in Kigali.`;
+    const variants = Array.isArray(product.variants) ? product.variants : [];
     const schema = {
       '@context': 'https://schema.org',
       '@type': 'Product',
@@ -1363,11 +1505,27 @@ async function serveStatic(req, res, url) {
       sku: product.id,
       category: product.category || product.categorySlug || 'Everyday Essentials',
       brand: { '@type': 'Brand', name: 'IwacuMall' },
-      offers: {
+      offers: variants.length ? {
+        '@type': 'AggregateOffer',
+        priceCurrency: config.currency,
+        lowPrice: Math.min(...variants.map(variant => Number(variant.price))),
+        highPrice: Math.max(...variants.map(variant => Number(variant.price))),
+        offerCount: variants.length,
+        offers: variants.map(variant => ({
+          '@type': 'Offer',
+          name: `${variant.type}: ${variant.value}`,
+          priceCurrency: config.currency,
+          price: variant.price,
+          availability: product.trackInventory === true && product.stock <= 0 ? 'https://schema.org/OutOfStock' : 'https://schema.org/InStock',
+          itemCondition: product.isSecondHand === true ? 'https://schema.org/UsedCondition' : 'https://schema.org/NewCondition',
+          url: canonical,
+        })),
+      } : {
         '@type': 'Offer',
         priceCurrency: config.currency,
         price: product.price,
-        availability: product.stock > 0 ? 'https://schema.org/InStock' : 'https://schema.org/OutOfStock',
+        availability: product.trackInventory === true && product.stock <= 0 ? 'https://schema.org/OutOfStock' : 'https://schema.org/InStock',
+        itemCondition: product.isSecondHand === true ? 'https://schema.org/UsedCondition' : 'https://schema.org/NewCondition',
         url: canonical,
       },
     };
@@ -1378,9 +1536,10 @@ async function serveStatic(req, res, url) {
       __PRODUCT_CANONICAL__: escapeHtml(canonical),
       __PRODUCT_IMAGE__: escapeHtml(imageUrl),
       __PRODUCT_CATEGORY__: escapeHtml(product.category || product.categorySlug || 'Everyday Essentials'),
+      __PRODUCT_CONDITION_BADGE__: product.isSecondHand === true ? 'Pre-owned · previously owned' : '',
       __PRODUCT_PRICE__: Number(product.price || 0).toLocaleString('en-US'),
-      __PRODUCT_STOCK_CLASS__: product.stock > 0 ? 'stock-in' : 'stock-out',
-      __PRODUCT_STOCK__: product.stock > 0 ? `In stock (${product.stock} available)` : 'Out of stock',
+      __PRODUCT_STOCK_CLASS__: product.trackInventory === true && product.stock <= 0 ? 'stock-out' : 'stock-in',
+      __PRODUCT_STOCK__: product.trackInventory === true ? product.stock > 0 ? `In stock (${product.stock} available)` : 'Out of stock' : 'Available',
       __PRODUCT_SCHEMA__: JSON.stringify(schema).replace(/</g, '\\u003c'),
     };
     const html = template.replace(/__PRODUCT_[A-Z_]+__/g, token => replacements[token] ?? '');

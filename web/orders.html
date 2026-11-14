@@ -1,3 +1,31 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>IwacuMall | My orders</title><link rel="icon" href="/assets/favicon.png"><link rel="stylesheet" href="/styles.css"><script type="module" src="/dashboard.js"></script></head>
-<body data-page="orders"><div class="announcement">IwacuMall • My shopping journey</div><header class="site-header"><div class="container header-row"><a class="brand" href="/"><img src="/assets/favicon.png" alt="">Iwacu<span class="brand-accent">Mall</span></a><div class="header-actions" style="margin-left:auto"><a class="btn btn-subtle" href="/">← Continue shopping</a><button class="btn btn-primary" id="signOutBtn">Sign out</button></div></div></header>
-<main class="inner-page"><div class="container"><div class="inner-head"><div><div class="section-label">YOUR ORDERS</div><h1>Order history</h1><p style="color:#8190aa;font-size:13px">Track the status of your IwacuMall purchases.</p></div></div><div id="ordersContent" style="max-width:850px"></div></div></main><div class="toast" id="toast" role="status"></div></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#1455D9"><meta name="description" content="Track IwacuMall orders, payment status and delivery progress.">
+  <title>My orders | IwacuMall</title>
+  <link rel="icon" href="/assets/favicon.png"><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/overrides.css?v=orders-account-redesign-20261114">
+  <script type="module" src="/dashboard.js?v=orders-account-redesign-20261114"></script>
+</head>
+<body data-page="orders">
+  <div class="announcement"><span class="announcement-dot"></span> IwacuMall · Your shopping journey <span class="announcement-dot"></span></div>
+  <header class="site-header"><div class="container header-row">
+    <a class="brand" href="/" aria-label="IwacuMall home"><img src="/assets/favicon.png" alt="">Iwacu<span class="brand-accent">Mall</span></a>
+    <nav class="order-header-actions" aria-label="Account navigation"><a class="btn btn-subtle" href="/account">My account</a><a class="btn btn-primary" href="/#products">Continue shopping</a><button class="btn btn-subtle" id="signOutBtn" type="button">Sign out</button></nav>
+  </div></header>
+  <main class="inner-page customer-orders-page"><div class="container">
+    <section class="customer-orders-hero">
+      <div><div class="section-label">YOUR IWACUMALL ACCOUNT</div><h1>Orders, all in one place.</h1><p id="ordersGreeting">Follow payment, preparation and delivery from checkout to your door.</p></div>
+      <div class="order-summary-grid" aria-label="Order summary">
+        <div><span>Recent orders</span><strong id="customerOrderCount">—</strong></div>
+        <div><span>Awaiting payment</span><strong id="customerOrderPending">—</strong></div>
+        <div><span>Paid total shown</span><strong id="customerOrderSpend">—</strong></div>
+      </div>
+    </section>
+    <div class="customer-orders-toolbar"><div><h2>Order history</h2><p>Your latest purchases and their current status.</p></div><a class="order-account-link" href="/account">Manage profile &amp; delivery details <span aria-hidden="true">→</span></a></div>
+    <div id="ordersContent" class="customer-order-list" aria-live="polite"><div class="empty-state">Loading your orders…</div></div>
+  </div></main>
+  <footer class="customer-order-footer"><div class="container"><span>Need help with an order?</span><a href="tel:+250788651421">Call IwacuMall · 0788 651 421</a><span>Downtown Kigali</span></div></footer>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

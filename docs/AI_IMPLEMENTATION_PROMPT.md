@@ -86,7 +86,7 @@ These findings came from the local review on 13 November 2026. Re-check the curr
 11. **Missing search-discovery routes:** `/sitemap.xml`, `/robots.txt`, and `/products/wireless-headphones` returned 404. Build sitemap/robots and real public product/category pages.
 12. **Session/cart reliability:** browser user restoration depends on sessionStorage, stale products can remain in submitted carts after disappearing from the displayed cart, and mobile initialization can sign out users after temporary network errors.
 
-Existing isolated checks passed for basic registration, cookies/CSRF, mobile bearer login, admin MFA, server-priced checkout, stock reservation, invoice ownership, manual payment confirmation, fulfillment, cancellation/expiry stock restoration, and concurrent overselling prevention. Preserve and strengthen these behaviors. Those checks do not establish production Atlas connectivity, actual inbox delivery, PDF rendering, browser interaction, or physical-device operation.
+Existing isolated checks passed for basic registration, cookies/CSRF, mobile bearer login, optional admin MFA, server-priced checkout, stock reservation, invoice ownership, manual payment confirmation, fulfillment, cancellation/expiry stock restoration, and concurrent overselling prevention. Preserve and strengthen these behaviors. Those checks do not establish production Atlas connectivity, actual inbox delivery, PDF rendering, browser interaction, or physical-device operation.
 
 ## 4. Existing files to inspect, modify, and preserve
 
@@ -162,7 +162,7 @@ Quality and operations additions:
 - Persist idempotency per authenticated customer and key with a unique index and request fingerprint. Replays return the original outcome without another stock deduction or email event. Conflicting payloads with the same key receive a clear conflict response.
 - Use deliberate payment/fulfillment/refund state transitions, guarded writes, and audit events. Prevent repeated stock restoration, repeated refunds, and duplicate payment confirmation.
 - Preserve HttpOnly browser sessions, appropriate secure cookie settings, CSRF protection for cookie-authenticated mutations, and secure bearer storage for native clients.
-- Enforce ownership on every customer order, invoice PDF, account, session, and refund-related endpoint. Enforce admin authorization/MFA on privileged operations.
+- Enforce ownership on every customer order, invoice PDF, account, session, and refund-related endpoint. Enforce admin authorization on privileged operations, and require MFA at login when an administrator has enabled it.
 - Tokens must be hashed where appropriate, single use when required, and explicitly checked for expiration. Expiring a token must preserve the user. Revocation/password changes must invalidate the intended sessions.
 - Restore browser state from the actual session on initialization. Native network failures must not be treated automatically as an invalid session.
 - Configure rate limits and trusted proxy behavior for the actual deployment. Use shared limits when multiple instances need coordinated enforcement.

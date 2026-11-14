@@ -38,6 +38,14 @@ String money(dynamic amount) {
 
 int countOf(dynamic v) => v is int ? v : int.tryParse('$v') ?? 0;
 String textOf(dynamic v) => v?.toString() ?? '';
+String cartLineKey(String productId, [String variantId = '']) => '$productId::$variantId';
+String productIdFromCartKey(String key) => key.split('::').first;
+String variantIdFromCartKey(String key) => key.contains('::') ? key.split('::').skip(1).join('::') : '';
+List<Map<String, dynamic>> productVariantsOf(Map<String, dynamic>? product) {
+  final raw = product?['variants'];
+  if (raw is! List) return [];
+  return raw.whereType<Map>().map((item) => Map<String, dynamic>.from(item)).toList();
+}
 
 class ShopState extends ChangeNotifier {
   ShopState(this.prefs, this.secureStorage);
@@ -60,17 +68,55 @@ class ShopState extends ChangeNotifier {
 
   bool get signedIn => token != null && token!.isNotEmpty;
   int get cartCount => cart.values.fold<int>(0, (a, b) => a + b);
+  int quantityForProduct(String productId) => cart.entries
+      .where((line) => productIdFromCartKey(line.key) == productId)
+      .fold<int>(0, (total, line) => total + line.value);
   int get subtotal => cart.entries.fold<int>(0, (sum, line) {
-        final item = products.where((p) => p['id'] == line.key).firstOrNull;
-        return sum + countOf(item?['price']) * line.value;
+        final productId = productIdFromCartKey(line.key);
+        final variantId = variantIdFromCartKey(line.key);
+        final item = products.where((p) => p['id'] == productId).firstOrNull;
+        final variants = productVariantsOf(item);
+        final variant = variants.where((option) => option['id'] == variantId).firstOrNull;
+        return sum + countOf(variant?['price'] ?? item?['price']) * line.value;
       });
-  List<Map<String, dynamic>> get cartProducts => products
-      .where((p) => cart.containsKey(p['id']))
-      .toList(growable: false);
-  List<String> get cartIssues => cart.entries.where((line) {
-        final product = products.where((p) => p['id'] == line.key).firstOrNull;
-        return product == null || line.value > countOf(product['stock']);
-      }).map((line) => line.key).toList(growable: false);
+  List<Map<String, dynamic>> get cartProducts {
+    final result = <Map<String, dynamic>>[];
+    for (final line in cart.entries) {
+      final productId = productIdFromCartKey(line.key);
+      final variantId = variantIdFromCartKey(line.key);
+      final product = products.where((item) => item['id'] == productId).firstOrNull;
+      if (product == null) continue;
+      final variants = productVariantsOf(product);
+      final variant = variants.where((option) => option['id'] == variantId).firstOrNull;
+      final variantLabel = variant == null ? '' : '${textOf(variant['type'])}: ${textOf(variant['value'])}';
+      result.add({...product, '_cartKey': line.key, '_variantId': variantId, '_variantLabel': variantLabel, '_linePrice': variant?['price'] ?? product['price']});
+    }
+    return result;
+  }
+  List<String> get cartIssues {
+    final issues = <String>{};
+    final totals = <String, int>{};
+    for (final line in cart.entries) {
+      final productId = productIdFromCartKey(line.key);
+      final variantId = variantIdFromCartKey(line.key);
+      final product = products.where((item) => item['id'] == productId).firstOrNull;
+      final variants = productVariantsOf(product);
+      final invalidVariant = variants.isEmpty ? variantId.isNotEmpty : !variants.any((option) => option['id'] == variantId);
+      if (product == null || product['active'] == false || invalidVariant) {
+        issues.add(line.key);
+      }
+      totals[productId] = (totals[productId] ?? 0) + line.value;
+    }
+    for (final entry in totals.entries) {
+      final product = products.where((item) => item['id'] == entry.key).firstOrNull;
+      if (product == null || product['active'] == false ||
+          (product['trackInventory'] == true && entry.value > countOf(product['stock']).clamp(0, 100)) ||
+          (product['trackInventory'] != true && entry.value > 100)) {
+        issues.addAll(cart.keys.where((key) => productIdFromCartKey(key) == entry.key));
+      }
+    }
+    return issues.toList(growable: false);
+  }
 
   Future<Map<String, dynamic>> request(
     String path, {
@@ -152,8 +198,10 @@ class ShopState extends ChangeNotifier {
     if (rawCart != null) {
       final c = jsonDecode(rawCart);
       if (c is Map) {
-        cart = c.map((key, value) =>
-            MapEntry(textOf(key), countOf(value)));
+        cart = c.map((key, value) {
+          final oldKey = textOf(key);
+          return MapEntry(cartLineKey(productIdFromCartKey(oldKey), variantIdFromCartKey(oldKey)), countOf(value));
+        });
       }
     }
     await refresh();
@@ -269,36 +317,56 @@ class ShopState extends ChangeNotifier {
     notifyListeners();
   }
 
-  void add(String productId, [int quantity = 1]) {
+  void add(String productId, [int quantity = 1, String variantId = '']) {
     final product = products.where((p) => p['id'] == productId).firstOrNull;
-    if (product == null) return;
-    if ((cart[productId] ?? 0) >= countOf(product['stock'])) return;
-    cart[productId] = ((cart[productId] ?? 0) + quantity).clamp(0, countOf(product['stock']));
+    if (product == null || product['active'] == false) return;
+    final variants = productVariantsOf(product);
+    if (variants.isNotEmpty && !variants.any((option) => option['id'] == variantId)) return;
+    final key = cartLineKey(productId, variantId);
+    final current = cart[key] ?? 0;
+    final limit = product['trackInventory'] == true ? countOf(product['stock']).clamp(0, 100).toInt() : 100;
+    final available = limit - quantityForProduct(productId) + current;
+    if (current >= available) return;
+    cart[key] = (current + quantity).clamp(0, available).toInt();
     _clearPendingCheckoutKey();
     _saveCart();
   }
 
-  void changeQuantity(String productId, int delta) {
+  void changeQuantity(String lineKey, int delta) {
+    final productId = productIdFromCartKey(lineKey);
     final product = products.where((p) => p['id'] == productId).firstOrNull;
-    if (product == null) return;
-    final count = ((cart[productId] ?? 0) + delta)
-        .clamp(0, countOf(product['stock']));
+    if (product == null || product['active'] == false) return;
+    final limit = product['trackInventory'] == true ? countOf(product['stock']).clamp(0, 100).toInt() : 100;
+    final available = limit - quantityForProduct(productId) + (cart[lineKey] ?? 0);
+    final count = ((cart[lineKey] ?? 0) + delta).clamp(0, available).toInt();
     if (count == 0) {
-      cart.remove(productId);
+      cart.remove(lineKey);
     } else {
-      cart[productId] = count;
+      cart[lineKey] = count;
     }
     _clearPendingCheckoutKey();
     _saveCart();
   }
 
   void reconcileCart() {
-    for (final id in cart.keys.toList()) {
-      final product = products.where((p) => p['id'] == id).firstOrNull;
-      if (product == null || countOf(product['stock']) == 0) {
-        cart.remove(id);
-      } else if (cart[id]! > countOf(product['stock'])) {
-        cart[id] = countOf(product['stock']);
+    final reserved = <String, int>{};
+    for (final key in cart.keys.toList()) {
+      final productId = productIdFromCartKey(key);
+      final variantId = variantIdFromCartKey(key);
+      final product = products.where((p) => p['id'] == productId).firstOrNull;
+      final variants = productVariantsOf(product);
+      final invalidVariant = variants.isEmpty ? variantId.isNotEmpty : !variants.any((option) => option['id'] == variantId);
+      if (product == null || product['active'] == false || invalidVariant) {
+        cart.remove(key);
+        continue;
+      }
+      final limit = product['trackInventory'] == true ? countOf(product['stock']).clamp(0, 100).toInt() : 100;
+      final available = (limit - (reserved[productId] ?? 0)).clamp(0, limit).toInt();
+      final quantity = (cart[key] ?? 0).clamp(0, available).toInt();
+      if (quantity == 0) cart.remove(key);
+      else {
+        cart[key] = quantity;
+        reserved[productId] = (reserved[productId] ?? 0) + quantity;
       }
     }
     _clearPendingCheckoutKey();
@@ -331,7 +399,11 @@ class ShopState extends ChangeNotifier {
       'paymentMethodId': paymentMethodId,
       'note': note,
       'items': cart.entries
-          .map((e) => {'productId': e.key, 'quantity': e.value})
+          .map((e) => {
+            'productId': productIdFromCartKey(e.key),
+            if (variantIdFromCartKey(e.key).isNotEmpty) 'variantId': variantIdFromCartKey(e.key),
+            'quantity': e.value,
+          })
           .toList(),
     };
     final fingerprint = jsonEncode(body);
@@ -604,7 +676,7 @@ class _ShopHomeState extends State<ShopHome> {
           sliver:SliverGrid.builder(
             itemCount:products.length,
             gridDelegate:const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount:2,mainAxisSpacing:13,crossAxisSpacing:13,childAspectRatio:.69),
-            itemBuilder:(context,i){final p=products[i];return ProductTile(product:p,onView:()=>showProductQuickView(context,p),onAdd:(){model.add(textOf(p['id']));ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('${p['name']} added to cart'),duration:const Duration(seconds:1)));});},
+            itemBuilder:(context,i){final p=products[i];return ProductTile(product:p,onView:()=>showProductQuickView(context,p),onAdd:(){if(productVariantsOf(p).isNotEmpty){showProductQuickView(context,p);return;}model.add(textOf(p['id']));ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('${p['name']} added to cart'),duration:const Duration(seconds:1)));});},
           ),
         ),
       ]),
@@ -627,14 +699,14 @@ class ProductTile extends StatelessWidget {
     decoration:BoxDecoration(color:Colors.white,borderRadius:BorderRadius.circular(17),boxShadow:[BoxShadow(color:const Color(0x0E081F62),blurRadius:14,offset:const Offset(0,5))]),
     clipBehavior:Clip.antiAlias,
     child:Material(color:Colors.transparent,child:InkWell(onTap:onView,child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-      Expanded(child:Stack(fit:StackFit.expand,children:[productImage(textOf(product['imageUrl'])),Positioned(right:8,top:8,child:DecoratedBox(decoration:BoxDecoration(color:Colors.white.withOpacity(.92),borderRadius:BorderRadius.circular(99)),child:const Padding(padding:EdgeInsets.symmetric(horizontal:9,vertical:6),child:Text('Quick view  ↗',style:TextStyle(fontSize:9,fontWeight:FontWeight.w800,color:blue))))])),
+      Expanded(child:Stack(fit:StackFit.expand,children:[productImage(textOf(product['imageUrl'])),if(product['isSecondHand']==true)Positioned(left:8,bottom:8,child:DecoratedBox(decoration:BoxDecoration(color:const Color(0xFFFFF8E8),border:Border.all(color:const Color(0xFFEFD9AA)),borderRadius:BorderRadius.circular(99)),child:const Padding(padding:EdgeInsets.symmetric(horizontal:9,vertical:6),child:Text('PRE-OWNED',style:TextStyle(fontSize:8,fontWeight:FontWeight.w900,color:Color(0xFF82561A)))))),Positioned(right:8,top:8,child:DecoratedBox(decoration:BoxDecoration(color:Colors.white.withOpacity(.92),borderRadius:BorderRadius.circular(99)),child:const Padding(padding:EdgeInsets.symmetric(horizontal:9,vertical:6),child:Text('Quick view  ↗',style:TextStyle(fontSize:9,fontWeight:FontWeight.w800,color:blue))))])),
       Padding(padding:const EdgeInsets.all(11),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
         Text(textOf(product['category']).toUpperCase(),style:const TextStyle(fontSize:9,letterSpacing:.7,color:Colors.blueGrey,fontWeight:FontWeight.w800)),
         const SizedBox(height:5),
         Text(textOf(product['name']),maxLines:1,overflow:TextOverflow.ellipsis,style:const TextStyle(fontWeight:FontWeight.w900,fontSize:14,color:navy)),
         const SizedBox(height:8),
-        Row(children:[Expanded(child:Text(money(product['price']),maxLines:1,style:const TextStyle(color:blue,fontWeight:FontWeight.w900,fontSize:13))),
-          SizedBox(width:33,height:33,child:IconButton.filledTonal(icon:const Icon(Icons.add,size:20),padding:EdgeInsets.zero,onPressed:countOf(product['stock'])>0?onAdd:null)),
+        Row(children:[Expanded(child:Text('${productVariantsOf(product).isNotEmpty?'From ':''}${money(product['price'])}',maxLines:1,style:const TextStyle(color:blue,fontWeight:FontWeight.w900,fontSize:13))),
+          SizedBox(width:33,height:33,child:IconButton.filledTonal(icon:const Icon(Icons.add,size:20),padding:EdgeInsets.zero,onPressed:product['active']==false||(product['trackInventory']==true&&countOf(product['stock'])<=0)?null:onAdd)),
         ]),
       ])),
     ]))),
@@ -649,10 +721,24 @@ Future<void> showProductQuickView(BuildContext context, Map<String,dynamic> prod
   final relatedProducts=model.products.where((item)=>textOf(item['id'])!=textOf(product['id'])&&
     item['active']!=false&&categorySlug.isNotEmpty&&textOf(item['categorySlug'])==categorySlug).take(6).toList();
   final stock=countOf(product['stock']);
-  final alreadyInCart=model.cart[textOf(product['id'])]??0;
-  final addable=(stock-alreadyInCart).clamp(0,stock);
+  final variants=productVariantsOf(product);
+  var selectedVariantId='';
+  Map<String,dynamic>? selectedVariant()=>variants.where((option)=>option['id']==selectedVariantId).firstOrNull;
+  int selectedPrice()=>countOf(selectedVariant()?['price']??product['price']);
+  final tracksInventory=product['trackInventory']==true;
+  final limit=tracksInventory?stock.clamp(0,100).toInt():100;
+  final productAvailable=product['active']!=false&&(!tracksInventory||stock>0);
+  final addable=(limit-model.quantityForProduct(textOf(product['id']))).clamp(0,limit).toInt();
   var quantity=addable>0?1:0;
   var selectedImageIndex=0;
+  void addSelectedVariant(BuildContext sheetContext) {
+    final option=selectedVariant();
+    model.add(textOf(product['id']),quantity,selectedVariantId);
+    final messenger=ScaffoldMessenger.of(sheetContext);
+    Navigator.pop(sheetContext);
+    final optionLabel=option==null?'':' · ${textOf(option['type'])}: ${textOf(option['value'])}';
+    messenger.showSnackBar(SnackBar(content:Text('$quantity × ${textOf(product['name'])}$optionLabel added to cart'),duration:const Duration(seconds:2)));
+  }
   return showModalBottomSheet<void>(
     context:context,
     isScrollControlled:true,
@@ -678,16 +764,25 @@ Future<void> showProductQuickView(BuildContext context, Map<String,dynamic> prod
         Text(textOf(product['category']).toUpperCase(),style:const TextStyle(color:blue,fontWeight:FontWeight.w900,fontSize:10,letterSpacing:1.1)),
         const SizedBox(height:6),
         Text(textOf(product['name']),style:const TextStyle(color:navy,fontWeight:FontWeight.w900,fontSize:23)),
+        if(product['isSecondHand']==true)...[const SizedBox(height:8),Align(alignment:Alignment.centerLeft,child:DecoratedBox(decoration:BoxDecoration(color:const Color(0xFFFFF8E8),border:Border.all(color:const Color(0xFFEFD9AA)),borderRadius:BorderRadius.circular(99)),child:const Padding(padding:EdgeInsets.symmetric(horizontal:11,vertical:7),child:Text('PRE-OWNED · PREVIOUSLY OWNED',style:TextStyle(color:Color(0xFF82561A),fontSize:9,fontWeight:FontWeight.w900,letterSpacing:.4)))))],
         const SizedBox(height:8),
-        Text(money(product['price']),style:const TextStyle(color:blue,fontWeight:FontWeight.w900,fontSize:21)),
+        Text(money(selectedPrice()),style:const TextStyle(color:blue,fontWeight:FontWeight.w900,fontSize:21)),
         const SizedBox(height:8),
         Text(textOf(product['description']).isEmpty?'A quality everyday find, selected for you.':textOf(product['description']),style:const TextStyle(height:1.5,color:Colors.blueGrey)),
+        if(variants.isNotEmpty)...[
+          const SizedBox(height:16),
+          const Align(alignment:Alignment.centerLeft,child:Text('Choose an option',style:TextStyle(color:navy,fontWeight:FontWeight.w900,fontSize:13))),
+          const SizedBox(height:8),
+          Align(alignment:Alignment.centerLeft,child:Wrap(spacing:8,runSpacing:7,children:variants.map((option){final id=textOf(option['id']);final selected=id==selectedVariantId;return ChoiceChip(label:Text('${textOf(option['type'])}: ${textOf(option['value'])} · ${money(option['price'])}'),selected:selected,onSelected:(value){setSheetState(()=>selectedVariantId=value?id:'');},selectedColor:const Color(0xFFEAF1FF),labelStyle:TextStyle(color:selected?blue:navy,fontSize:11,fontWeight:FontWeight.w700));}).toList())),
+          const SizedBox(height:5),
+          const Align(alignment:Alignment.centerLeft,child:Text('Select the exact option you want before adding it to your cart.',style:TextStyle(color:Colors.blueGrey,fontSize:10))),
+        ],
         const SizedBox(height:12),
-        Row(children:[Icon(stock>0?Icons.check_circle:Icons.remove_shopping_cart,color:stock>0?Colors.green:Colors.red,size:18),const SizedBox(width:7),Text(stock>0?(stock<6?'Only $stock left':'In stock and ready to order'):'Currently out of stock',style:TextStyle(fontWeight:FontWeight.w800,color:stock>0?Colors.green:Colors.red))]),
+        Row(children:[Icon(productAvailable?Icons.check_circle:Icons.remove_shopping_cart,color:productAvailable?Colors.green:Colors.red,size:18),const SizedBox(width:7),Text(!productAvailable?'Currently unavailable':tracksInventory?(stock<6?'Only $stock left':'In stock and ready to order'):'Available',style:TextStyle(fontWeight:FontWeight.w800,color:productAvailable?Colors.green:Colors.red))]),
         const SizedBox(height:15),
-        Row(children:[const Text('Quantity',style:TextStyle(fontWeight:FontWeight.w700)),const Spacer(),IconButton(onPressed:quantity>1?()=>setSheetState(()=>quantity--):null,icon:const Icon(Icons.remove_circle_outline)),Text('$quantity',style:const TextStyle(fontWeight:FontWeight.w900)),IconButton(onPressed:quantity<addable?()=>setSheetState(()=>quantity++):null,icon:const Icon(Icons.add_circle_outline)),Text(money(countOf(product['price'])*quantity),style:const TextStyle(color:navy,fontWeight:FontWeight.w900))]),
+        Row(children:[const Text('Quantity',style:TextStyle(fontWeight:FontWeight.w700)),const Spacer(),IconButton(onPressed:quantity>1?()=>setSheetState(()=>quantity--):null,icon:const Icon(Icons.remove_circle_outline)),Text('$quantity',style:const TextStyle(fontWeight:FontWeight.w900)),IconButton(onPressed:quantity<addable?()=>setSheetState(()=>quantity++):null,icon:const Icon(Icons.add_circle_outline)),Text(money(selectedPrice()*quantity),style:const TextStyle(color:navy,fontWeight:FontWeight.w900))]),
         const SizedBox(height:8),
-        SizedBox(height:49,child:FilledButton(onPressed:addable>0?(){model.add(textOf(product['id']),quantity);final messenger=ScaffoldMessenger.of(sheetContext);Navigator.pop(sheetContext);messenger.showSnackBar(SnackBar(content:Text('$quantity × ${textOf(product['name'])} added to cart'),duration:const Duration(seconds:2)));}:null,child:Text(addable>0?'Add to cart  ·  ${money(countOf(product['price'])*quantity)}':'Maximum available quantity is in your cart'))),
+        SizedBox(height:49,child:FilledButton(onPressed:productAvailable&&addable>0&&(variants.isEmpty||selectedVariant()!=null)?()=>addSelectedVariant(sheetContext):null,child:Text(variants.isNotEmpty&&selectedVariant()==null?'Choose an option':addable>0?'Add to cart  ·  ${money(selectedPrice()*quantity)}':'Maximum quantity is in your cart'))),
         if(relatedProducts.isNotEmpty)...[
           const SizedBox(height:22),
           const Align(alignment:Alignment.centerLeft,child:Text('You may also like',style:TextStyle(color:navy,fontWeight:FontWeight.w900,fontSize:16))),
@@ -718,8 +813,8 @@ class CartPage extends StatelessWidget {
     final model=ShopScope.of(context);
     return Column(children:[
       Padding(padding:const EdgeInsets.fromLTRB(18,22,18,15),child:Row(children:[Text('Your cart',style:Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight:FontWeight.w900,color:navy)),const Spacer(),Text('${model.cartCount} items')])),
-      if(model.cartIssues.isNotEmpty)Padding(padding:const EdgeInsets.symmetric(horizontal:16),child:Card(color:const Color(0xFFFFF7DA),child:Padding(padding:const EdgeInsets.all(12),child:Row(children:[const Expanded(child:Text('Some saved items are unavailable or exceed current stock. Update your cart before checkout.',style:TextStyle(fontSize:12))),TextButton(onPressed:model.reconcileCart,child:const Text('Update cart'))])))),
-      Expanded(child:model.cartProducts.isEmpty?const Center(child:Column(mainAxisSize:MainAxisSize.min,children:[Icon(Icons.shopping_bag_outlined,size:66,color:blue),SizedBox(height:15),Text('Your cart is empty',style:TextStyle(fontWeight:FontWeight.w800,fontSize:18))])):ListView.builder(padding:const EdgeInsets.symmetric(horizontal:16),itemCount:model.cartProducts.length,itemBuilder:(context,index){final p=model.cartProducts[index],id=textOf(p['id']);return Card(color:Colors.white,margin:const EdgeInsets.only(bottom:12),child:Padding(padding:const EdgeInsets.all(10),child:Row(children:[SizedBox(width:88,height:92,child:ClipRRect(borderRadius:BorderRadius.circular(11),child:productImage(textOf(p['imageUrl'])))),const SizedBox(width:13),Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(textOf(p['name']),style:const TextStyle(fontWeight:FontWeight.w800)),const SizedBox(height:8),Text(money(p['price']),style:const TextStyle(color:blue,fontWeight:FontWeight.w800)),Row(children:[IconButton(icon:const Icon(Icons.remove_circle_outline),onPressed:()=>model.changeQuantity(id,-1)),Text('${model.cart[id]}'),IconButton(icon:const Icon(Icons.add_circle_outline),onPressed:()=>model.changeQuantity(id,1))])]))])));}),
+      if(model.cartIssues.isNotEmpty)Padding(padding:const EdgeInsets.symmetric(horizontal:16),child:Card(color:const Color(0xFFFFF7DA),child:Padding(padding:const EdgeInsets.all(12),child:Row(children:[const Expanded(child:Text('Some saved items are unavailable or need an option selected. Update your cart before checkout.',style:TextStyle(fontSize:12))),TextButton(onPressed:model.reconcileCart,child:const Text('Update cart'))])))),
+      Expanded(child:model.cartProducts.isEmpty?const Center(child:Column(mainAxisSize:MainAxisSize.min,children:[Icon(Icons.shopping_bag_outlined,size:66,color:blue),SizedBox(height:15),Text('Your cart is empty',style:TextStyle(fontWeight:FontWeight.w800,fontSize:18))])):ListView.builder(padding:const EdgeInsets.symmetric(horizontal:16),itemCount:model.cartProducts.length,itemBuilder:(context,index){final p=model.cartProducts[index];final id=textOf(p['_cartKey']);final option=textOf(p['_variantLabel']);return Card(color:Colors.white,margin:const EdgeInsets.only(bottom:12),child:Padding(padding:const EdgeInsets.all(10),child:Row(children:[SizedBox(width:88,height:92,child:ClipRRect(borderRadius:BorderRadius.circular(11),child:productImage(textOf(p['imageUrl'])))),const SizedBox(width:13),Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(textOf(p['name']),style:const TextStyle(fontWeight:FontWeight.w800)),if(p['isSecondHand']==true)Padding(padding:const EdgeInsets.only(top:5),child:DecoratedBox(decoration:BoxDecoration(color:const Color(0xFFFFF8E8),border:Border.all(color:const Color(0xFFEFD9AA)),borderRadius:BorderRadius.circular(99)),child:const Padding(padding:EdgeInsets.symmetric(horizontal:8,vertical:4),child:Text('PRE-OWNED',style:TextStyle(color:Color(0xFF82561A),fontSize:8,fontWeight:FontWeight.w900))))),if(option.isNotEmpty)Padding(padding:const EdgeInsets.only(top:4),child:Text(option,style:const TextStyle(color:Colors.blueGrey,fontSize:11,fontWeight:FontWeight.w700))),const SizedBox(height:8),Text(money(p['_linePrice']),style:const TextStyle(color:blue,fontWeight:FontWeight.w800)),Row(children:[IconButton(icon:const Icon(Icons.remove_circle_outline),onPressed:()=>model.changeQuantity(id,-1)),Text('${model.cart[id]}'),IconButton(icon:const Icon(Icons.add_circle_outline),onPressed:()=>model.changeQuantity(id,1))])]))])));}),
       ),
       Container(color:Colors.white,padding:const EdgeInsets.all(18),child:SafeArea(top:false,child:Column(children:[Row(children:[const Text('Subtotal',style:TextStyle(fontWeight:FontWeight.w700)),const Spacer(),Text(money(model.subtotal),style:const TextStyle(fontSize:21,fontWeight:FontWeight.w900,color:blue))]),const SizedBox(height:7),const Text('Delivery charges, if any, are confirmed separately by the store.',style:TextStyle(fontSize:11,color:Colors.blueGrey)),const SizedBox(height:15),SizedBox(width:double.infinity,child:FilledButton(onPressed:model.cartCount==0||model.cartIssues.isNotEmpty?null:()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>const CheckoutPage())),child:const Text('Proceed to checkout  →')))]))),
     ]);
@@ -1098,7 +1193,7 @@ class _OrdersPageState extends State<OrdersPage> {
                       const SizedBox(height:4),
                       Text(textOf(request['reason']),style:const TextStyle(fontSize:12,color:Colors.blueGrey)),
                       if(textOf(request['reviewNote']).isNotEmpty)Padding(padding:const EdgeInsets.only(top:5),child:Text(textOf(request['reviewNote']),style:const TextStyle(fontSize:12,color:blue))),
-                      ...(request['items'] as List? ?? []).map((item)=>Text('${item['productName']} × ${item['quantity']}${request['status']=='RECEIVED'?' · received ${item['returnedQuantity']??0} · restocked ${item['restockedQuantity']??0}':''}',style:const TextStyle(fontSize:11,color:Colors.blueGrey))),
+                      ...(request['items'] as List? ?? []).map((item)=>Text('${item['productName']} × ${item['quantity']}${request['status']=='RECEIVED'?' · received ${item['returnedQuantity']??0}':''}',style:const TextStyle(fontSize:11,color:Colors.blueGrey))),
                     ]))),
                   ],
                   if(returnPolicy['canRequest']==true)Padding(padding:const EdgeInsets.only(top:8),child:OutlinedButton.icon(

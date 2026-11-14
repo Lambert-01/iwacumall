@@ -14,7 +14,7 @@
   <title>__PRODUCT_NAME__ | IwacuMall</title>
   <link rel="icon" href="/assets/favicon.png">
   <link rel="stylesheet" href="/styles.css">
-  <link rel="stylesheet" href="/overrides.css">
+  <link rel="stylesheet" href="/overrides.css?v=variant-condition-repair-20261114">
   <style>
     .product-detail-layout {
       display: grid;
@@ -27,6 +27,10 @@
     }
     @media (max-width: 768px) {
       .product-detail-layout { grid-template-columns: 1fr; gap: 24px; margin: 20px auto; }
+    }
+    @media (max-width: 480px) {
+      .product-detail-variant-list { grid-template-columns: 1fr; }
+      .product-detail-info { padding: 22px; }
     }
     .product-detail-img-box {
       background: #fff;
@@ -75,6 +79,17 @@
       margin-bottom: 24px;
       white-space: pre-wrap;
     }
+    .product-detail-variants { margin: 0 0 22px; }
+    .product-detail-variants h2 { margin: 0 0 10px; color: #243a62; font-size: 14px; }
+    .product-detail-variant-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+    .product-detail-variant { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 11px; border: 1px solid #e4eaf4; border-radius: 12px; background: #fff; cursor: pointer; transition: border-color .16s, background .16s, box-shadow .16s; }
+    .product-detail-variant.is-selected { border-color: #1455d9; background: #f5f8ff; box-shadow: 0 0 0 2px #1455d914; }
+    .product-detail-variant input { accent-color: #1455d9; flex: 0 0 auto; }
+    .product-detail-variant span { display: grid; gap: 3px; min-width: 0; }
+    .product-detail-variant small { color: #8491a8; font-size: 10px; }
+    .product-detail-variant strong { overflow-wrap: anywhere; color: #273c62; font-size: 12px; line-height: 1.35; }
+    .product-detail-variant b { margin-left: auto; color: #1455d9; font-size: 11px; white-space: nowrap; }
+    .product-detail-variant-note { display: block; margin-top: 8px; color: #7d8aa1; font-size: 11px; }
     .product-detail-stock {
       display: inline-block;
       padding: 4px 12px;
@@ -132,9 +147,16 @@
       <div class="product-detail-info">
         <div id="productCategory" class="product-detail-cat">__PRODUCT_CATEGORY__</div>
         <h1 id="productTitle" class="product-detail-title">__PRODUCT_NAME__</h1>
+        <span id="productConditionBadge" class="condition-badge product-condition-badge" hidden>__PRODUCT_CONDITION_BADGE__</span>
         <div id="productPrice" class="product-detail-price">RWF __PRODUCT_PRICE__</div>
         <div id="productStockBadge" class="product-detail-stock __PRODUCT_STOCK_CLASS__">__PRODUCT_STOCK__</div>
         <p id="productDescription" class="product-detail-desc">__PRODUCT_DESCRIPTION__</p>
+
+        <section id="productVariantSection" class="product-detail-variants" aria-labelledby="productVariantsHeading" hidden>
+          <h2 id="productVariantsHeading">Choose your option</h2>
+          <div id="productVariantList" class="product-detail-variant-list" role="radiogroup" aria-label="Available product options"></div>
+          <small class="product-detail-variant-note">Preview an option here. Choose it in the product popup before adding it to your cart.</small>
+        </section>
 
         <div class="product-qty-row">
           <label style="font-weight:bold;font-size:14px;color:#081F62;">Quantity:</label>
@@ -155,6 +177,6 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script type="module" src="/product.js"></script>
+  <script type="module" src="/product.js?v=variant-condition-repair-20261114"></script>
 </body>
 </html>

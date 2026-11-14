@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#1455d9">
-  <meta name="description" content="Manage IwacuMall products, inventory and customer orders.">
+  <meta name="description" content="Manage IwacuMall products, availability and customer orders.">
   <title>IwacuMall | Admin workspace</title>
   <link rel="icon" href="/assets/favicon.png">
   <link rel="stylesheet" href="/styles.css">
-  <link rel="stylesheet" href="/overrides.css">
-  <script type="module" src="/dashboard.js"></script>
+  <link rel="stylesheet" href="/overrides.css?v=orders-account-redesign-20261114">
+  <script type="module" src="/dashboard.js?v=orders-account-redesign-20261114"></script>
 </head>
-<body class="admin-body" data-page="admin">
+<body class="admin-body admin-login-mode" data-page="admin">
   <header class="admin-topbar">
     <a class="brand" href="/" aria-label="IwacuMall storefront">
       <img src="/assets/favicon.png" alt=""><span>Iwacu<span class="brand-accent">Mall</span></span>
@@ -44,33 +44,22 @@
     </aside>
 
     <section class="admin-main">
-      <div id="adminLocked" class="admin-locked" hidden>
-        <div class="locked-symbol">🔐</div>
-        <div class="section-label">SECURE WORKSPACE</div>
-        <h1>Administrator access required</h1>
-        <p>Sign in with the administrator account configured for this store to manage orders and products.</p>
-        <a href="/" class="btn btn-primary">Go to sign in <span>→</span></a>
-      </div>
-
-      <section id="adminMfaSetup" class="admin-locked" hidden>
-        <div class="locked-symbol">🛡️</div>
-        <div class="section-label">SECURE WORKSPACE</div>
-        <h1>Set up administrator two-factor authentication</h1>
-        <p>Add this account to an authenticator app, then enter its six-digit code to unlock the dashboard.</p>
-        <button class="btn btn-primary" id="beginMfaSetup" type="button">Create setup secret</button>
-        <div id="mfaSecretBox" hidden class="admin-card" style="margin:1rem auto;max-width:520px;text-align:left">
-          <strong>Manual setup key</strong>
-          <code id="mfaSecret" style="display:block;word-break:break-all;margin:.6rem 0"></code>
-          <p>Keep this key private. Enter it in your authenticator app as a time-based code account.</p>
-          <strong>One-use recovery codes</strong>
-          <pre id="mfaRecoveryCodes" style="white-space:pre-wrap;background:#f6f8fc;padding:.8rem;border-radius:8px"></pre>
-          <p>Save these somewhere private. Each code can be used once if you lose access to your authenticator.</p>
-          <form id="verifyMfaSetup" class="admin-form">
-            <label>Six-digit authenticator code<input name="code" class="form-control" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" minlength="6" maxlength="6" required></label>
-            <button class="btn btn-primary full" type="submit">Verify and enable MFA</button>
-          </form>
+      <div id="adminLocked" class="admin-locked admin-login-card" hidden>
+        <div class="admin-login-brand">
+          <img src="/assets/favicon.png" alt="IwacuMall logo" width="64" height="64">
         </div>
-      </section>
+        <div class="admin-login-eyebrow"><span></span> ADMINISTRATOR CONSOLE</div>
+        <h1>Administrator sign-in</h1>
+        <p>Secure access to your orders, products, and store operations.</p>
+        <form id="adminLoginForm" class="admin-form admin-login-form">
+          <label>Email address<input name="email" type="email" class="form-control" placeholder="admin@yourstore.com" autocomplete="username" required></label>
+          <label>Password<input name="password" type="password" class="form-control" placeholder="Enter your password" autocomplete="current-password" required></label>
+          <label id="adminLoginMfaField" hidden>Authenticator or recovery code<input name="totpCode" type="text" class="form-control" placeholder="6-digit code" autocomplete="one-time-code" inputmode="numeric" autocapitalize="characters" maxlength="16"></label>
+          <p id="adminLoginError" class="admin-login-error" role="alert" hidden></p>
+          <button class="btn btn-primary full admin-login-submit" type="submit"><span>Sign in to dashboard</span><span aria-hidden="true">→</span></button>
+        </form>
+        <div class="admin-login-security"><span aria-hidden="true">◈</span><span>Protected administrator sign-in.</span></div>
+      </div>
 
       <div id="adminContent" hidden>
         <div class="admin-page-heading">
@@ -94,6 +83,12 @@
             <select class="form-control toolbar-select" id="orderStatusFilter" aria-label="Filter orders by status">
               <option value="all">All statuses</option><option>PLACED</option><option>CONFIRMED</option><option>PACKING</option><option>OUT_FOR_DELIVERY</option><option>DELIVERED</option><option>CANCELLED</option>
             </select>
+            <select class="form-control toolbar-select" id="orderPaymentFilter" aria-label="Filter orders by payment">
+              <option value="all">All payments</option><option>PENDING</option><option>PAID</option><option>VOID</option><option>EXPIRED</option>
+            </select>
+            <select class="form-control toolbar-select" id="orderVisibilityFilter" aria-label="Choose active or deleted orders">
+              <option value="active">Active orders</option><option value="deleted">Deleted orders</option>
+            </select>
           </div>
           <div id="adminOrders" class="admin-order-list" aria-live="polite"></div>
           <div class="products-load-more"><button id="loadMoreAdminOrders" class="btn btn-subtle" type="button" hidden>Load more orders</button></div>
@@ -109,63 +104,42 @@
 
         <section id="panel-products" class="admin-panel" aria-labelledby="productsHeading">
           <div class="admin-section-head">
-            <div><div class="section-label">CATALOG</div><h2 id="productsHeading">Products and inventory</h2><p>Update product details, pricing, and available stock.</p></div>
+            <div><div class="section-label">CATALOG</div><h2 id="productsHeading">Products</h2><p>Manage product details, photos, pricing, options, and availability.</p></div>
+            <button class="btn btn-primary" type="button" data-open-product-dialog>＋ Add product</button>
           </div>
-          <div class="admin-products-layout">
-            <section class="admin-card create-product-card">
-              <div class="admin-card-title"><span class="admin-card-icon">＋</span><div><h3>Add a product</h3><p>New items appear in the storefront catalog.</p></div></div>
-              <form id="createProduct" class="admin-form">
-                <label>Product name<input name="name" class="form-control" placeholder="e.g. Fresh mangoes" required></label>
-                <div class="form-two">
-                  <label>Price (RWF)<input name="price" type="number" class="form-control" min="0" step="1" required></label>
-                  <label>Stock quantity<input name="stock" type="number" class="form-control" min="0" step="1" required></label>
-                </div>
-                <label>Category<select id="adminCategorySelect" name="categorySlug" class="form-control" required></select></label>
-                <label>Description<textarea class="form-control" name="description" rows="3" placeholder="A short description for shoppers"></textarea></label>
-                <label>Primary product image URL<input id="productImageUrl" class="form-control admin-product-image-url" name="imageUrl" placeholder="Upload photos or paste an HTTPS image URL"></label>
-                <input id="productImagePublicId" type="hidden" name="imagePublicId" value="">
-                <input id="productImages" type="hidden" name="images" value="[]">
-                <label>Upload product photos<input id="productImageFile" class="form-control" type="file" accept="image/png,image/jpeg,image/webp" multiple><small>Select up to 8 PNG, JPG or WebP photos · up to 8 MB each. Uploads use the store’s configured durable image storage.</small></label>
-                <div id="productImageUploadStatus" class="image-upload-status" role="status" aria-live="polite"></div>
-                <img id="productImagePreview" class="product-image-preview" alt="Product image preview" hidden>
-                <label class="admin-check"><input type="checkbox" name="featured" value="1"><span>Feature this product on the shop</span></label>
-                <button class="btn btn-primary full" type="submit">Add to catalog <span>→</span></button>
-              </form>
-            </section>
-            <section class="admin-card inventory-card">
-              <div class="admin-card-title inventory-title"><div><h3>Catalog inventory</h3><p id="productCount">Manage listing details and stock.</p></div><label class="admin-search compact-search"><span>⌕</span><input id="productSearch" type="search" placeholder="Find a product" aria-label="Search products"></label><label class="stock-filter-label">Stock view<select id="inventoryStockFilter" class="form-control"><option value="all">All stock</option><option value="low">Low stock (1–5)</option><option value="out">Out of stock</option></select></label></div>
-              <div id="adminProducts" class="admin-product-list" aria-live="polite"></div>
-            </section>
-          </div>
+          <p id="productUploadConfigNotice" class="product-upload-config-notice" hidden role="status"></p>
+          <section class="admin-card admin-table-card">
+            <div class="admin-table-toolbar">
+              <div><h3>Product catalog</h3><p id="productCount">Loading products…</p></div>
+              <div class="admin-table-filters">
+                <label class="admin-search"><span>⌕</span><input id="productSearch" type="search" placeholder="Search name, description or category" aria-label="Search products"></label>
+              </div>
+            </div>
+            <div class="admin-table-scroll"><table class="admin-data-table product-data-table"><thead><tr><th>Name</th><th>Description</th><th>Category</th><th>Price</th><th>Photo</th><th>Availability</th><th>Date</th><th>Status</th><th>Actions</th></tr></thead><tbody id="adminProducts" aria-live="polite"></tbody></table></div>
+          </section>
         </section>
 
         <section id="panel-categories" class="admin-panel" aria-labelledby="categoriesHeading">
           <div class="admin-section-head">
-            <div><div class="section-label">SHOP ORGANIZATION</div><h2 id="categoriesHeading">Product categories</h2><p>Keep browsing simple by grouping related products.</p></div>
+            <div><div class="section-label">SHOP ORGANIZATION</div><h2 id="categoriesHeading">Product categories</h2><p>Manage category names, descriptions, images, and catalog status.</p></div>
+            <button class="btn btn-primary" type="button" data-open-category-dialog>＋ Add category</button>
           </div>
-          <div class="admin-categories-layout">
-            <section class="admin-card category-create-card">
-              <div class="admin-card-title"><span class="admin-card-icon">◈</span><div><h3>Create a category</h3><p>Use a short, shopper-friendly name.</p></div></div>
-              <form id="createCategory" class="category-form">
-                <label>Category name<input name="name" class="form-control" placeholder="e.g. Books & Stationery" required></label>
-                <button class="btn btn-primary" type="submit">Create category <span>→</span></button>
-              </form>
-            </section>
-            <section class="admin-card">
-              <div class="admin-card-title"><div><h3>Store categories</h3><p>These categories are visible to shoppers.</p></div></div>
-              <div id="adminCategories" class="admin-category-list" aria-live="polite"></div>
-            </section>
-          </div>
+          <p id="categoryUploadConfigNotice" class="product-upload-config-notice" hidden role="status"></p>
+          <section class="admin-card admin-table-card">
+            <div class="admin-table-toolbar"><div><h3>Category list</h3><p id="categoryCount">Loading categories…</p></div><label class="admin-search category-search"><span>⌕</span><input id="categorySearch" type="search" placeholder="Search categories" aria-label="Search categories"></label></div>
+            <div class="admin-table-scroll"><table class="admin-data-table category-data-table"><thead><tr><th>Image</th><th>Name</th><th>Description</th><th>Products</th><th>Status</th><th>Actions</th></tr></thead><tbody id="adminCategories" aria-live="polite"></tbody></table></div>
+          </section>
         </section>
 
         <section id="panel-settings" class="admin-panel" aria-labelledby="settingsHeading">
           <div class="admin-section-head">
             <div><div class="section-label">STORE CONFIGURATION</div><h2 id="settingsHeading">Store settings</h2><p>These values are used at checkout and printed on customer invoices.</p></div>
           </div>
-          <div class="admin-products-layout">
-            <section class="admin-card">
-              <div class="admin-card-title"><div><h3>Administrator sign-in security</h3><p>Authenticator codes and recovery codes protect dashboard access.</p></div></div>
-              <button class="btn btn-subtle" id="rotateMfaSetup" type="button">Replace authenticator and recovery codes</button>
+          <div class="admin-settings-grid">
+            <section class="admin-card admin-settings-card">
+              <div class="admin-card-title"><div><h3>Optional sign-in security</h3><p>An authenticator adds a second check at sign-in. You can keep using your password without setting it up.</p></div></div>
+              <p id="adminMfaStatus" class="admin-security-status" role="status">Authenticator verification is optional.</p>
+              <button class="btn btn-subtle" id="rotateMfaSetup" type="button">Set up authenticator</button>
               <div id="mfaRotationBox" hidden class="admin-card" style="margin-top:1rem;max-width:620px">
                 <strong>New manual setup key</strong>
                 <code id="mfaRotationSecret" style="display:block;word-break:break-all;margin:.6rem 0"></code>
@@ -179,15 +153,21 @@
                 </form>
               </div>
             </section>
-            <section class="admin-card">
-              <div class="admin-card-title"><div><h3>Store details and checkout rules</h3><p>Changes apply to new orders immediately.</p></div></div>
-              <form id="storeSettingsForm" class="admin-form">
+            <section class="admin-card admin-settings-card">
+              <div class="admin-card-title"><div><h3>Store profile</h3><p>Contact details shown at checkout and on customer invoices.</p></div></div>
+              <form id="storeProfileForm" class="admin-form">
                 <label>Store name<input name="storeName" class="form-control" required maxlength="100"></label>
                 <label>Store address<input name="storeAddress" class="form-control" required maxlength="200"></label>
                 <div class="form-two">
                   <label>Store phone<input name="storePhone" class="form-control" required maxlength="30"></label>
                   <label>Store email<input name="storeEmail" type="email" class="form-control" maxlength="254"></label>
                 </div>
+                <button class="btn btn-primary" type="submit">Save store profile</button>
+              </form>
+            </section>
+            <section class="admin-card admin-settings-card">
+              <div class="admin-card-title"><div><h3>Checkout and invoice rules</h3><p>These settings apply to new customer orders.</p></div></div>
+              <form id="storeSettingsForm" class="admin-form">
                 <div class="form-two">
                   <label>Flat delivery fee (RWF)<input name="deliveryFeeFlat" type="number" class="form-control" min="0" step="1" required></label>
                   <label>Invoice payment deadline (hours)<input name="invoiceExpiryHours" type="number" class="form-control" min="1" max="720" step="1" required></label>
@@ -196,10 +176,10 @@
                   <label>Tax rate percent (use -1 if not configured)<input name="taxRatePercent" type="number" class="form-control" min="-1" max="100" step="1" required></label>
                   <label>Customer return request window (days)<input name="returnWindowDays" type="number" class="form-control" min="0" max="365" step="1" required><small>Set 0 to disable return requests. Use the period stated in your approved return policy.</small></label>
                 </div>
-                <button class="btn btn-primary" type="submit">Save store settings</button>
+                <button class="btn btn-primary" type="submit">Save checkout rules</button>
               </form>
             </section>
-            <section class="admin-card">
+            <section class="admin-card admin-settings-card">
               <div class="admin-card-title"><span class="admin-card-icon">₣</span><div><h3>Manual invoice payment methods</h3><p>Customers see these instructions after ordering. Confirm incoming payments manually.</p></div></div>
               <div id="adminPaymentMethods" class="admin-payment-method-list" aria-live="polite"></div>
               <form id="createPaymentMethod" class="admin-form" style="margin-top:1.2rem">
@@ -219,6 +199,41 @@
       </div>
     </section>
   </main>
+  <dialog id="productEditorDialog" class="admin-editor-dialog" aria-labelledby="productDialogTitle">
+    <form id="createProduct" class="admin-form admin-editor-form">
+      <div class="admin-dialog-heading"><div><span class="section-label">CATALOG ITEM</span><h2 id="productDialogTitle">Add product</h2><p id="productDialogDescription">Add the details shoppers will see in the store.</p></div><button class="admin-dialog-close" type="button" data-close-dialog aria-label="Close dialog">×</button></div>
+      <input type="hidden" name="productId" value="">
+      <label>Product name<input name="name" class="form-control" placeholder="e.g. Fresh mangoes" required maxlength="120"></label>
+      <label id="productBasePriceLabel">Price (RWF)<input id="productBasePrice" name="price" type="number" class="form-control" min="0" step="1" required></label>
+      <label>Category<select id="adminCategorySelect" name="categorySlug" class="form-control" required></select></label>
+      <label>Description<textarea class="form-control" name="description" rows="3" maxlength="1200" placeholder="A short description for shoppers"></textarea></label>
+      <section class="product-variant-builder" aria-labelledby="productVariantsHeading">
+        <div class="product-variant-builder-head"><div><h3 id="productVariantsHeading">Options and prices</h3><p>Add sizes, flavours, colours, or another option. Each option can have its own price.</p></div><button class="btn btn-subtle" id="addProductVariant" type="button">＋ Add option</button></div>
+        <div id="productVariantRows" class="product-variant-rows" aria-live="polite"></div>
+        <small class="product-variant-note">When options are added, shoppers choose one in the product popup. The storefront shows the lowest option price as “From”.</small>
+        <input id="productVariants" type="hidden" name="variants" value="[]">
+      </section>
+      <div class="admin-photo-picker"><label for="productImageFile">Product photos</label><input id="productImageFile" class="form-control" type="file" accept="image/png,image/jpeg,image/webp" multiple disabled><small>Select up to 8 PNG, JPG or WebP photos · up to 8 MB each. Selected photos upload to Cloudinary.</small><div class="admin-image-preview-row"><img id="productImagePreview" class="product-image-preview" alt="Product image preview" hidden><span id="productImageUploadStatus" class="image-upload-status" role="status" aria-live="polite"></span></div></div>
+      <input id="productImageUrl" type="hidden" name="imageUrl" value="">
+      <input id="productImagePublicId" type="hidden" name="imagePublicId" value="">
+      <input id="productImages" type="hidden" name="images" value="[]">
+      <label class="admin-check"><input type="checkbox" name="featured" value="1"><span>Feature this product on the shop</span></label>
+      <label class="admin-check"><input type="checkbox" name="isSecondHand" value="1"><span class="admin-check-copy">Second-hand / pre-owned item<small class="admin-check-help">Shows a clear pre-owned label to shoppers and on invoices.</small></span></label>
+      <div class="admin-dialog-actions"><button class="btn btn-subtle" type="button" data-close-dialog>Cancel</button><button class="btn btn-primary" type="submit" id="saveProductButton" disabled>Add to catalog <span>→</span></button></div>
+    </form>
+  </dialog>
+  <dialog id="categoryEditorDialog" class="admin-editor-dialog" aria-labelledby="categoryDialogTitle">
+    <form id="createCategory" class="admin-form admin-editor-form">
+      <div class="admin-dialog-heading"><div><span class="section-label">SHOP ORGANIZATION</span><h2 id="categoryDialogTitle">Add category</h2><p id="categoryDialogDescription">Add a name, a short description, and an optional image.</p></div><button class="admin-dialog-close" type="button" data-close-dialog aria-label="Close dialog">×</button></div>
+      <input type="hidden" name="categoryId" value="">
+      <label>Category name<input name="name" class="form-control" placeholder="e.g. Books & Stationery" required maxlength="80"></label>
+      <label>Description<textarea name="description" class="form-control" rows="3" maxlength="500" placeholder="A short description for this category"></textarea></label>
+      <div class="admin-photo-picker"><label for="categoryImageFile">Category image</label><input id="categoryImageFile" class="form-control" type="file" accept="image/png,image/jpeg,image/webp" disabled><small>Choose a PNG, JPG or WebP file up to 8 MB. The photo is uploaded to Cloudinary.</small><div class="admin-image-preview-row"><img id="categoryImagePreview" class="product-image-preview" alt="Category image preview" hidden><span id="categoryImageUploadStatus" class="image-upload-status" role="status" aria-live="polite"></span></div></div>
+      <input id="categoryImageUrl" type="hidden" name="imageUrl" value="">
+      <input id="categoryImagePublicId" type="hidden" name="imagePublicId" value="">
+      <div class="admin-dialog-actions"><button class="btn btn-subtle" type="button" data-close-dialog>Cancel</button><button class="btn btn-primary" type="submit" id="saveCategoryButton">Add category <span>→</span></button></div>
+    </form>
+  </dialog>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 </body>
 </html>

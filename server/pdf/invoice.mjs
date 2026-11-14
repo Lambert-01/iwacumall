@@ -125,7 +125,7 @@ export function generateInvoicePdf(order, storeConfig = {}) {
       let isAlt = false;
 
       for (const item of items) {
-        const productName = String(item.productName || item.productId || 'Item');
+        const productName = `${String(item.productName || item.productId || 'Item')}${item.isSecondHand === true ? ' · Pre-owned' : ''}`;
         doc.font('Helvetica').fontSize(8.5);
         const rowHeight = Math.max(20, Math.ceil(doc.heightOfString(productName, { width: 280 })) + 8);
         if (tableY + rowHeight > 725) {

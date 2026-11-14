@@ -6,7 +6,7 @@ IwacuMall is a responsive shopping website and Flutter Android client backed by 
 
 - Responsive catalogue, categories, search, cart, customer accounts and order history.
 - MongoDB Atlas persistence, password hashing, HttpOnly browser sessions, CSRF protection and secure token storage in the Android app.
-- Email verification, password reset, administrator authenticator MFA and shared rate limiting across API instances.
+- Email verification, password reset, optional administrator authenticator MFA and shared rate limiting across API instances.
 - Server-priced checkout, stock reservation, configurable delivery/tax/deadline settings, printable invoices, manual payment confirmation and scheduled expiration with stock restoration for unpaid overdue orders.
 - Admin screens for orders, fulfilment, products, categories, store settings and payment methods.
 - Draft privacy, sale terms and delivery-policy pages that require owner completion before publication.
@@ -31,7 +31,7 @@ npm ci
 npm start
 ```
 
-Open the storefront at `http://127.0.0.1:4000/`. Admin access uses the first administrator configured with `ADMIN_EMAIL` and a unique `ADMIN_PASSWORD`. After signing in, complete authenticator MFA before using admin features.
+Open the storefront at `http://127.0.0.1:4000/`. Admin access uses the first administrator configured with `ADMIN_EMAIL` and a unique `ADMIN_PASSWORD`. If that account already exists and needs to be synchronized from `.env`, run `npm run admin:seed`; this resets that account's password, revokes its current sessions, and preserves its MFA setting. Authenticator MFA is optional and can be enabled from **Admin → Store settings**.
 
 Configure a payment method and the delivery fee and payment deadline in **Admin → Store settings**. Checkout stays disabled until a payment method, delivery fee and deadline are available.
 

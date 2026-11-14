@@ -9,7 +9,7 @@ Use this checklist to review the storefront, admin dashboard, API, and Android c
 - [ ] Product names, descriptions, prices, images, categories, and stock match the approved catalog.
 - [ ] Product quick view shows current details, available stock, quantity totals, add-to-cart, relevant category suggestions, and selectable gallery photos on web and Android.
 - [ ] Customers can register, sign in, manage a cart, and place orders.
-- [ ] Google sign-in works on the authorized production domain, and administrator accounts remain behind password plus MFA.
+- [ ] Google sign-in works on the authorized production domain; admin accounts require password sign-in, and enabled MFA is verified at login.
 - [ ] Production email verification, password reset and resend-verification flows work with the real sender.
 - [ ] Temporarily unavailable SMTP delivery is retried from the outbox, expired account links are not sent, and queued tokens are absent from admin API responses.
 - [ ] Browser sessions are HttpOnly, CSRF checks pass, and bearer tokens are not returned to browser JavaScript.

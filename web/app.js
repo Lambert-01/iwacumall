@@ -13,6 +13,7 @@ const state = {
   user: JSON.parse(sessionStorage.getItem('iwm_user') || 'null'),
   modal: '',
   quickViewProduct: null,
+  quickViewVariantId: '',
   quickViewQty: 1,
   quickViewImageIndex: 0,
   quickViewRelated: null,
@@ -89,13 +90,32 @@ function updateCartBadge() {
 function categoryIcon(slug) {
   return ({'groceries':'🛒','electronics':'🎧','home-living':'🛋️','fashion':'👟','beauty-care':'🧴','fresh-produce':'🥑'})[slug] || '🎁';
 }
+function productVariants(product) { return Array.isArray(product?.variants) ? product.variants : []; }
+function variantFor(product, variantId) { return productVariants(product).find(variant => variant.id === variantId) || null; }
+function variantLabel(variant) { return variant ? `${variant.type}: ${variant.value}` : ''; }
+function tracksInventory(product) { return product?.trackInventory === true; }
+function productOrderLimit(product) {
+  return tracksInventory(product) ? Math.max(0, Math.min(100, Number(product?.stock || 0))) : 100;
+}
+function productCanBeOrdered(product) {
+  return !!product && product.active !== false && (!tracksInventory(product) || Number(product.stock || 0) > 0);
+}
+function cartQuantityForProduct(productId) {
+  return state.cart.filter(item => item.productId === productId).reduce((total, item) => total + Number(item.quantity || 0), 0);
+}
 function categoryColor(index) { return ['#fdf4dc','#e7f0ff','#faeaf0','#e5f8ee','#f1eaff','#fff1e8'][index % 6]; }
 function productCard(p) {
   const productUrl = `/products/${esc(p.slug || p.id)}`;
-  return `<article class="product-card"><div class="product-picture"><a href="${productUrl}" aria-label="View ${esc(p.name)}"><img src="${esc(p.imageUrl||'/assets/products/fallback.png')}" alt="${esc(p.name)}" loading="lazy"></a>${p.featured?'<span class="product-tag">✦ Popular pick</span>':''}<button class="quick-view-trigger" data-view-product="${esc(p.id)}" aria-label="Quick view ${esc(p.name)}">Quick view <span aria-hidden="true">↗</span></button></div><div class="product-content"><div class="product-category">${esc(p.category||'Uncategorized')}</div><h3><a href="${productUrl}" style="color:inherit;text-decoration:none;">${esc(p.name)}</a></h3><p class="short-desc">${esc(p.description)}</p><div class="price-row"><div><b>${fmt(p.price)}</b>${p.stock>0?`<div class="stock-hint">${p.stock<6?`Only ${p.stock} left`:'Ready to ship'}</div>`:'<div class="out-stock">Out of stock</div>'}</div><button class="add-btn" data-add="${esc(p.id)}" aria-label="Add ${esc(p.name)} to cart" ${p.stock===0?'disabled':''}>+</button></div></div></article>`;
+  const variants = productVariants(p);
+  const canOrder = productCanBeOrdered(p);
+  const optionButton = variants.length
+    ? `<button class="add-btn product-options-btn" data-view-product="${esc(p.id)}" aria-label="Choose options for ${esc(p.name)}" ${canOrder?'':'disabled'}>↗</button>`
+    : `<button class="add-btn" data-add="${esc(p.id)}" aria-label="Add ${esc(p.name)} to cart" ${canOrder?'':'disabled'}>+</button>`;
+  const availability = canOrder ? (tracksInventory(p) ? p.stock < 6 ? `Only ${p.stock} left` : 'Ready to ship' : 'Available') : 'Unavailable';
+  return `<article class="product-card"><div class="product-picture"><a href="${productUrl}" aria-label="View ${esc(p.name)}"><img src="${esc(p.imageUrl||'/assets/products/fallback.png')}" alt="${esc(p.name)}" loading="lazy"></a>${p.featured?'<span class="product-tag">✦ Popular pick</span>':''}<button class="quick-view-trigger" data-view-product="${esc(p.id)}" aria-label="Quick view ${esc(p.name)}">Quick view <span aria-hidden="true">↗</span></button></div><div class="product-content"><div class="product-category">${esc(p.category||'Uncategorized')}</div>${p.isSecondHand === true ? '<span class="condition-badge">Pre-owned</span>' : ''}<h3><a href="${productUrl}" style="color:inherit;text-decoration:none;">${esc(p.name)}</a></h3><p class="short-desc">${esc(p.description)}</p><div class="price-row"><div><b>${variants.length ? 'From ' : ''}${fmt(p.price)}</b>${variants.length ? `<div class="stock-hint">${variants.length} options</div>` : canOrder?`<div class="stock-hint">${availability}</div>`:'<div class="out-stock">Unavailable</div>'}</div>${optionButton}</div></div></article>`;
 }
 function renderCategories() {
-  const cards = state.categories.map((cat, i) => `<button class="category-card" data-category="${esc(cat.slug)}"><div class="category-icon" style="--category-bg:${categoryColor(i)}">${categoryIcon(cat.slug)}</div><strong>${esc(cat.name)}</strong></button>`).join('');
+  const cards = state.categories.map((cat, i) => `<button class="category-card" data-category="${esc(cat.slug)}"><div class="category-icon" style="--category-bg:${categoryColor(i)}">${cat.imageUrl?`<img src="${esc(cat.imageUrl)}" alt="" loading="lazy" onerror="this.replaceWith(document.createTextNode('${categoryIcon(cat.slug)}'))">`:categoryIcon(cat.slug)}</div><strong>${esc(cat.name)}</strong></button>`).join('');
   $('#categoryGrid').innerHTML = cards;
 }
 function renderChips() {
@@ -147,22 +167,38 @@ async function loadProductsPage(reset = true) {
 function cartDetails() {
   return state.cart.map(item => {
     const product = getProduct(item.productId);
-    return product ? { ...product, quantity: item.quantity } : null;
+    if (!product) return null;
+    const variant = variantFor(product, item.variantId);
+    return { ...product, price: variant ? variant.price : product.price, selectedVariant: variant, quantity: item.quantity };
   }).filter(Boolean);
 }
 function cartIssues() {
-  return state.cart.filter(item => {
+  const invalidVariant = state.cart.filter(item => {
     const product = getProduct(item.productId);
-    return !product || product.stock < item.quantity;
+    if (!product) return true;
+    const variants = productVariants(product);
+    return product.active === false || (variants.length ? !variantFor(product, item.variantId) : !!item.variantId);
   });
+  const totals = new Map();
+  for (const item of state.cart) totals.set(item.productId, (totals.get(item.productId) || 0) + Number(item.quantity || 0));
+  const stockIssues = [...totals].filter(([productId, quantity]) => {
+    const product = getProduct(productId);
+    return !product || !productCanBeOrdered(product) || quantity > productOrderLimit(product);
+  });
+  return [...invalidVariant, ...stockIssues.map(([productId]) => ({ productId }))];
 }
 function renderCart() {
   const items = cartDetails();
   $('#cartItems').innerHTML = state.cart.length
     ? state.cart.map(item => {
         const p = getProduct(item.productId);
-        if (!p) return `<div class="cart-item"><div><strong>Unavailable product</strong><small>This item is no longer listed.</small></div><button class="remove-item" data-remove="${esc(item.productId)}">Remove</button></div>`;
-        return `<div class="cart-item"><img src="${esc(p.imageUrl||'/assets/products/fallback.png')}" alt=""><div><strong>${esc(p.name)}</strong><small>${fmt(p.price)}</small>${p.stock<item.quantity?'<small class="out-stock">Only '+p.stock+' left. Update quantity.</small>':''}<div class="qty-controls"><button aria-label="Decrease quantity" data-qty="${esc(p.id)}" data-change="-1">−</button><b>${item.quantity}</b><button aria-label="Increase quantity" data-qty="${esc(p.id)}" data-change="1">+</button></div></div><button class="remove-item" data-remove="${esc(p.id)}">Remove</button></div>`;
+        const variant = variantFor(p, item.variantId);
+        const variantId = item.variantId || '';
+        const price = variant ? variant.price : p?.price;
+        if (!p) return `<div class="cart-item"><div><strong>Unavailable product</strong><small>This item is no longer listed.</small></div><button class="remove-item" data-remove="${esc(item.productId)}" data-remove-variant="${esc(variantId)}">Remove</button></div>`;
+        const label = variantLabel(variant);
+        const productQty = cartQuantityForProduct(p.id);
+        return `<div class="cart-item"><img src="${esc(p.imageUrl||'/assets/products/fallback.png')}" alt=""><div><strong>${esc(p.name)}</strong>${p.isSecondHand === true ? '<small class="condition-badge cart-condition-badge">Pre-owned</small>' : ''}${label?`<small class="cart-variant-label">${esc(label)}</small>`:''}<small>${fmt(price)}</small>${tracksInventory(p)&&p.stock<productQty?'<small class="out-stock">Only '+p.stock+' left across all options.</small>':''}<div class="qty-controls"><button aria-label="Decrease quantity" data-qty="${esc(p.id)}" data-variant-id="${esc(variantId)}" data-change="-1">−</button><b>${item.quantity}</b><button aria-label="Increase quantity" data-qty="${esc(p.id)}" data-variant-id="${esc(variantId)}" data-change="1">+</button></div></div><button class="remove-item" data-remove="${esc(p.id)}" data-remove-variant="${esc(variantId)}">Remove</button></div>`;
       }).join('')
     : '<div class="empty-cart"><span>🛍️</span><strong>Your cart is empty</strong>Find something you love and add it here.</div>';
   $('#cartTotal').textContent = fmt(items.reduce((s, p) => s + p.price * p.quantity, 0));
@@ -171,11 +207,12 @@ function renderCart() {
 }
 function showCart() { renderCart(); $('#overlay').hidden = false; $('#cartDrawer').classList.add('open'); $('#cartDrawer').setAttribute('aria-hidden','false'); }
 function getProduct(id) {
-  return state.products.find(item => item.id === id) || state.productCache.get(id) || null;
+  return state.productCache.get(id) || state.products.find(item => item.id === id) || null;
 }
 function closeAll() {
   state.modal = '';
   state.quickViewProduct = null;
+  state.quickViewVariantId = '';
   state.quickViewRelated = null;
   state.quickViewRelatedLoading = false;
   state.quickViewRequestId++;
@@ -191,11 +228,29 @@ function modal(content) {
   $('#modalHolder').innerHTML = `<div class="modal${state.modal === 'product' ? ' modal-product' : ''}" role="dialog" aria-modal="true">${content}</div>`;
   $('#modalHolder .close-btn')?.focus();
 }
+function syncGoogleSignInOption() {
+  if (!['login', 'register'].includes(state.modal)) return;
+  const form = $('#authForm');
+  if (!form) return;
+  let area = $('#googleSignInArea');
+  if (!area) {
+    form.insertAdjacentHTML('beforebegin', '<div class="google-signin-box" id="googleSignInArea"><div id="googleSignInButton"></div></div><div class="auth-divider" id="googleAuthDivider"><span>or use your email</span></div>');
+    area = $('#googleSignInArea');
+  }
+  const button = $('#googleSignInButton');
+  if (!state.storeConfig?.googleWebClientId) {
+    if (button) {
+      button.textContent = state.storeConfig ? 'Google sign-in is not configured for this store.' : 'Loading Google sign-in…';
+      button.classList.add('google-signin-status');
+    }
+    return;
+  }
+  loadGoogleIdentityButton();
+}
 function authModal(isRegister = false) {
   state.modal = isRegister ? 'register' : 'login';
-  const googleButton = state.storeConfig?.googleWebClientId ? '<div class="google-signin-box"><div id="googleSignInButton"></div></div><div class="auth-divider"><span>or use your email</span></div>' : '';
-  modal(`<div class="modal-head"><div><div class="section-label">WELCOME ${isRegister?'TO IWACUMALL':'BACK'}</div><h2>${isRegister?'Create an account':'Sign in to IwacuMall'}</h2></div><button class="close-btn" data-action="close-overlay" aria-label="Close">×</button></div><p>${isRegister?'Join us to place your first order and track your favorites.':'Welcome back! Let\'s get you shopping.'}</p>${googleButton}<form id="authForm">${isRegister?'<div class="field"><label for="authName">Full name</label><input id="authName" name="name" autocomplete="name" required minlength="2"></div>':''}<div class="field"><label for="authEmail">Email address</label><input id="authEmail" type="email" name="email" autocomplete="email" required></div><div class="field"><label for="authPassword">Password</label><input id="authPassword" name="password" type="password" autocomplete="${isRegister?'new-password':'current-password'}" required minlength="${isRegister?'10':'1'}"></div>${!isRegister?'<div class="field" id="totpField" hidden><label for="totpCode">Authenticator or recovery code</label><input id="totpCode" name="totpCode" autocomplete="one-time-code" autocapitalize="characters" maxlength="16"></div>':''}<p class="form-error" id="authError" hidden></p><button class="btn btn-primary full" type="submit">${isRegister?'Create account':'Sign in'} →</button></form>${!isRegister?'<button class="modal-switch" data-action="forgot-password">Forgot your password?</button>':''}<button class="modal-switch" data-action="${isRegister?'switch-login':'switch-register'}">${isRegister?'Already have an account? Sign in':'New here? Create an account'}</button>`);
-  if (googleButton) loadGoogleIdentityButton();
+  modal(`<div class="modal-head"><div><div class="section-label">WELCOME ${isRegister?'TO IWACUMALL':'BACK'}</div><h2>${isRegister?'Create an account':'Sign in to IwacuMall'}</h2></div><button class="close-btn" data-action="close-overlay" aria-label="Close">×</button></div><p>${isRegister?'Join us to place your first order and track your favorites.':'Welcome back! Let\'s get you shopping.'}</p><form id="authForm">${isRegister?'<div class="field"><label for="authName">Full name</label><input id="authName" name="name" autocomplete="name" required minlength="2"></div>':''}<div class="field"><label for="authEmail">Email address</label><input id="authEmail" type="email" name="email" autocomplete="email" required></div><div class="field"><label for="authPassword">Password</label><input id="authPassword" name="password" type="password" autocomplete="${isRegister?'new-password':'current-password'}" required minlength="${isRegister?'10':'1'}"></div>${!isRegister?'<div class="field" id="totpField" hidden><label for="totpCode">Authenticator or recovery code</label><input id="totpCode" name="totpCode" autocomplete="one-time-code" autocapitalize="characters" maxlength="16"></div>':''}<p class="form-error" id="authError" hidden></p><button class="btn btn-primary full" type="submit">${isRegister?'Create account':'Sign in'} →</button></form>${!isRegister?'<button class="modal-switch" data-action="forgot-password">Forgot your password?</button>':''}<button class="modal-switch" data-action="${isRegister?'switch-login':'switch-register'}">${isRegister?'Already have an account? Sign in':'New here? Create an account'}</button>`);
+  syncGoogleSignInOption();
 }
 
 function loadGoogleIdentityButton() {
@@ -218,10 +273,23 @@ function loadGoogleIdentityButton() {
       state.googleClientInitialized = clientId;
     }
     const root = $('#googleSignInButton');
+    root.classList.remove('google-signin-status');
     root.replaceChildren();
     window.google.accounts.id.renderButton(root, { theme: 'outline', size: 'large', shape: 'pill', text: 'continue_with', width: Math.min(360, Math.max(220, root.parentElement.clientWidth)) });
   };
   if (window.google?.accounts?.id) return renderButton();
+  const renderWhenReady = (attempt = 0) => {
+    if (window.google?.accounts?.id) return renderButton();
+    if (attempt >= 20) {
+      const root = $('#googleSignInButton');
+      if (root) {
+        root.textContent = 'Google sign-in could not load. Check your connection and OAuth setup.';
+        root.classList.add('google-signin-status');
+      }
+      return;
+    }
+    setTimeout(() => renderWhenReady(attempt + 1), 250);
+  };
   let script = document.querySelector('script[data-google-identity]');
   if (!script) {
     script = document.createElement('script');
@@ -229,12 +297,17 @@ function loadGoogleIdentityButton() {
     script.async = true;
     script.defer = true;
     script.dataset.googleIdentity = 'true';
-    script.onload = renderButton;
-    script.onerror = () => { if ($('#googleSignInButton')) $('#googleSignInButton').textContent = 'Google sign-in is temporarily unavailable.'; };
+    script.onload = () => renderWhenReady();
+    script.onerror = () => {
+      const root = $('#googleSignInButton');
+      if (root) {
+        root.textContent = 'Google sign-in could not load. Check your connection and OAuth setup.';
+        root.classList.add('google-signin-status');
+      }
+    };
     document.head.append(script);
   } else {
-    script.addEventListener('load', renderButton, { once: true });
-    setTimeout(renderButton, 500);
+    renderWhenReady();
   }
 }
 
@@ -254,24 +327,31 @@ function quickViewImages(product) {
 
 function renderQuickView(product, loading = false) {
   state.quickViewProduct = product;
+  const variants = productVariants(product);
+  if (variants.length && !variants.some(variant => variant.id === state.quickViewVariantId)) state.quickViewVariantId = '';
+  if (!variants.length) state.quickViewVariantId = '';
+  const selectedVariant = variantFor(product, state.quickViewVariantId);
+  const unitPrice = selectedVariant ? selectedVariant.price : Number(product?.price || 0);
+  const variantMarkup = variants.length ? `<section class="quick-view-variants" aria-labelledby="quickViewVariantsHeading"><div class="quick-view-variants-heading"><strong id="quickViewVariantsHeading">Choose an option</strong><span>All ${variants.length} options</span></div><div class="quick-view-variant-list" role="group" aria-label="All ${variants.length} product options">${variants.map(variant => `<button type="button" class="quick-view-variant ${variant.id === selectedVariant?.id ? 'is-selected' : ''}" data-quick-variant="${esc(variant.id)}" aria-pressed="${variant.id === selectedVariant?.id}"><span><small>${esc(variant.type)}</small><strong>${esc(variant.value)}</strong></span><b>${fmt(variant.price)}</b></button>`).join('')}</div><small class="quick-view-variant-note">Choose the exact option you want. Its price will be used in your cart.</small></section>` : '';
   const images = quickViewImages(product);
   state.quickViewImageIndex = Math.min(state.quickViewImageIndex, images.length - 1);
   const selectedImage = images[state.quickViewImageIndex];
   const thumbnails = images.length > 1 ? `<div class="quick-view-thumbnails" role="group" aria-label="Product photos">${images.map((image, index) => `<button class="quick-view-thumbnail ${index === state.quickViewImageIndex ? 'is-active' : ''}" type="button" data-quick-image="${index}" aria-label="View photo ${index + 1} of ${images.length}" aria-pressed="${index === state.quickViewImageIndex}"><img src="${esc(image.url)}" alt="" loading="lazy" onerror="this.src='/assets/products/fallback.png'"></button>`).join('')}</div>` : '';
-  const alreadyInCart = state.cart.find((item) => item.productId === product?.id)?.quantity || 0;
-  const availableToAdd = Math.max(0, Number(product?.stock || 0) - alreadyInCart);
+  const availableToAdd = Math.max(0, productOrderLimit(product) - cartQuantityForProduct(product?.id));
   const localRelated = state.products.filter(item => item.id !== product?.id && item.active !== false && item.categorySlug === product?.categorySlug).slice(0, 4);
   const related = state.quickViewRelated ?? localRelated;
   const stock = Math.max(0, Number(product?.stock || 0));
-  const stockText = stock <= 0 ? 'Currently out of stock' : stock < 6 ? `Only ${stock} left` : 'In stock';
+  const canOrder = productCanBeOrdered(product);
+  const stockText = !canOrder ? 'Currently unavailable' : tracksInventory(product) ? stock < 6 ? `Only ${stock} left` : 'In stock' : 'Available';
   const relatedMarkup = !loading ? quickViewRelatedMarkup(related, state.quickViewRelatedLoading) : '';
-  modal(`<section class="quick-view"><div class="quick-view-image"><span class="quick-view-image-badge">${product?.featured ? '✦ Popular pick' : esc(product?.category || 'IwacuMall pick')}</span><div class="quick-view-image-stage"><img id="quickViewMainImage" src="${esc(selectedImage.url)}" alt="${esc(product?.name||'Product')}" onerror="this.src='/assets/products/fallback.png'"></div>${thumbnails}</div><div class="quick-view-info"><div class="modal-head"><div><div class="section-label">${esc(product?.category||'IWACUMALL PICK')}</div><h2>${esc(product?.name||'Loading product…')}</h2></div><button class="close-btn" data-action="close-overlay" aria-label="Close product details">×</button></div>${loading?'<div class="quick-view-skeleton" aria-label="Loading product details"></div>':`<div class="quick-view-price">${fmt(product.price)}</div><p class="quick-view-description">${esc(product.description||'A quality everyday find, selected for you.')}</p><div class="quick-view-stock ${stock>0?'available':'unavailable'}" role="status" aria-live="polite">${stockText}</div><div class="quick-view-quantity"><span>Quantity</span><div><button data-quick-qty="-1" aria-label="Decrease quantity" ${state.quickViewQty<=1?'disabled':''}>−</button><b id="quickViewQty" aria-live="polite">${state.quickViewQty}</b><button data-quick-qty="1" aria-label="Increase quantity" ${state.quickViewQty>=availableToAdd?'disabled':''}>+</button></div><strong id="quickViewTotal" aria-live="polite">${fmt(Number(product.price)*state.quickViewQty)}</strong></div><button class="btn btn-primary full" data-quick-add ${availableToAdd<=0?'disabled':''}>Add to cart <span>· ${fmt(Number(product.price)*state.quickViewQty)}</span></button><a class="quick-view-details" href="/products/${esc(product.slug||product.id)}">See full product details →</a>${relatedMarkup}`}</div></section>`);
+  modal(`<section class="quick-view"><div class="quick-view-image"><span class="quick-view-image-badge">${product?.featured ? '✦ Popular pick' : esc(product?.category || 'IwacuMall pick')}</span><div class="quick-view-image-stage"><img id="quickViewMainImage" src="${esc(selectedImage.url)}" alt="${esc(product?.name||'Product')}" onerror="this.src='/assets/products/fallback.png'"></div>${thumbnails}</div><div class="quick-view-info"><div class="modal-head"><div><div class="section-label">${esc(product?.category||'IWACUMALL PICK')}</div><h2>${esc(product?.name||'Loading product…')}</h2>${product?.isSecondHand === true ? '<span class="condition-badge quick-view-condition">Pre-owned · previously owned</span>' : ''}</div><button class="close-btn" data-action="close-overlay" aria-label="Close product details">×</button></div>${loading?'<div class="quick-view-skeleton" aria-label="Loading product details"></div>':`<div class="quick-view-price">${fmt(unitPrice)}</div><p class="quick-view-description">${esc(product.description||'A quality everyday find, selected for you.')}</p>${variantMarkup}<div class="quick-view-stock ${canOrder?'available':'unavailable'}" role="status" aria-live="polite">${stockText}</div><div class="quick-view-quantity"><span>Quantity</span><div><button data-quick-qty="-1" aria-label="Decrease quantity" ${state.quickViewQty<=1?'disabled':''}>−</button><b id="quickViewQty" aria-live="polite">${state.quickViewQty}</b><button data-quick-qty="1" aria-label="Increase quantity" ${state.quickViewQty>=availableToAdd?'disabled':''}>+</button></div><strong id="quickViewTotal" aria-live="polite">${fmt(unitPrice*state.quickViewQty)}</strong></div><button class="btn btn-primary full" data-quick-add ${(availableToAdd<=0 || (variants.length>0 && !selectedVariant))?'disabled':''}>${variants.length>0&&!selectedVariant?'Choose an option first':'Add to cart'} <span>· ${fmt(unitPrice*state.quickViewQty)}</span></button><a class="quick-view-details" href="/products/${esc(product.slug||product.id)}">See full product details →</a>${relatedMarkup}`}</div></section>`);
 }
 
 async function openProductQuickView(id) {
   state.modal = 'product';
   const requestId = ++state.quickViewRequestId;
   state.quickViewQty = 1;
+  state.quickViewVariantId = '';
   state.quickViewImageIndex = 0;
   state.quickViewRelated = null;
   state.quickViewRelatedLoading = false;
@@ -281,6 +361,7 @@ async function openProductQuickView(id) {
     const result = await api(`/products/${encodeURIComponent(id)}`);
     if (state.modal !== 'product' || requestId !== state.quickViewRequestId) return;
     state.quickViewQty = 1;
+    state.quickViewVariantId = '';
     cacheProduct(result.product);
     renderQuickView(result.product);
     if (result.product.categorySlug) void loadQuickViewRecommendations(result.product, requestId);
@@ -456,29 +537,37 @@ async function logout() {
   toast('Signed out successfully');
 }
 
-function addToCart(id, quantity = 1, product = null) {
+function addToCart(id, quantity = 1, product = null, variantId = '') {
   const p = product || getProduct(id);
   if (!p) return;
-  const item = state.cart.find(x => x.productId === id);
+  const variants = productVariants(p);
+  const variant = variantFor(p, variantId);
+  if (variants.length && !variant) { toast('Choose an available option first'); return; }
+  if (!variants.length && variantId) { toast('This option is no longer available'); return; }
+  if (!productCanBeOrdered(p)) { toast('This product is unavailable'); return; }
+  const item = state.cart.find(x => x.productId === id && (x.variantId || '') === (variant?.id || ''));
   const requested = Math.max(1, Number(quantity) || 1);
+  const otherQuantity = cartQuantityForProduct(id) - Number(item?.quantity || 0);
+  const remaining = Math.max(0, productOrderLimit(p) - otherQuantity);
   if (item) {
-    if (item.quantity >= p.stock) { toast('No more stock available'); return; }
-    item.quantity = Math.min(item.quantity + requested, p.stock);
+    if (item.quantity >= remaining) { toast('Maximum quantity reached for this product'); return; }
+    item.quantity = Math.min(item.quantity + requested, remaining);
   } else {
-    if (p.stock <= 0) { toast('This item is out of stock'); return; }
-    state.cart.push({ productId: id, quantity: Math.min(requested, p.stock) });
+    if (remaining <= 0) { toast('Maximum quantity reached for this product'); return; }
+    state.cart.push({ productId: id, ...(variant ? { variantId: variant.id } : {}), quantity: Math.min(requested, remaining) });
   }
   saveCart();
-  toast(`${p.name} added to cart`);
+  toast(`${p.name}${variant ? ` · ${variant.type}: ${variant.value}` : ''} added to cart`);
 }
 
-function setQty(id, change) {
-  const item = state.cart.find(i => i.productId === id);
+function setQty(id, change, variantId = '') {
+  const item = state.cart.find(i => i.productId === id && (i.variantId || '') === variantId);
   const p    = getProduct(id);
   if (!item || !p) return;
+  const otherQuantity = cartQuantityForProduct(id) - Number(item.quantity || 0);
   item.quantity += change;
-  if (item.quantity <= 0) state.cart = state.cart.filter(i => i.productId !== id);
-  else if (item.quantity > p.stock) { item.quantity = p.stock; toast('You reached the available stock'); }
+  if (item.quantity <= 0) state.cart = state.cart.filter(i => !(i.productId === id && (i.variantId || '') === variantId));
+  else if (item.quantity > productOrderLimit(p) - otherQuantity) { item.quantity = Math.max(0, productOrderLimit(p) - otherQuantity); toast('You reached the maximum quantity'); }
   saveCart(); renderCart();
 }
 
@@ -488,6 +577,13 @@ document.addEventListener('click', async (e) => {
   if (target.dataset.add)      { addToCart(target.dataset.add); return; }
   if (target.dataset.viewProduct) { await openProductQuickView(target.dataset.viewProduct); return; }
   if (target.dataset.relatedProduct) { await openProductQuickView(target.dataset.relatedProduct); return; }
+  if (target.dataset.quickVariant) {
+    const product = state.quickViewProduct;
+    if (!product || !variantFor(product, target.dataset.quickVariant)) return;
+    state.quickViewVariantId = target.dataset.quickVariant;
+    renderQuickView(product);
+    return;
+  }
   if (target.dataset.quickImage !== undefined) {
     const product = state.quickViewProduct;
     const images = quickViewImages(product);
@@ -509,13 +605,18 @@ document.addEventListener('click', async (e) => {
   if (target.dataset.quickQty) {
     const product = state.quickViewProduct;
     if (!product) return;
-    const inCart = state.cart.find((item) => item.productId === product.id)?.quantity || 0;
-    const maxAdd = Math.max(1, Number(product.stock) - inCart);
+    const maxAdd = Math.max(1, productOrderLimit(product) - cartQuantityForProduct(product.id));
     state.quickViewQty = Math.max(1, Math.min(maxAdd, state.quickViewQty + Number(target.dataset.quickQty)));
+    const selectedVariant = variantFor(product, state.quickViewVariantId);
+    const unitPrice = selectedVariant ? selectedVariant.price : Number(product.price);
     $('#quickViewQty').textContent = state.quickViewQty;
-    $('#quickViewTotal').textContent = fmt(Number(product.price) * state.quickViewQty);
+    $('#quickViewTotal').textContent = fmt(unitPrice * state.quickViewQty);
     const addButton = $('[data-quick-add]');
-    if (addButton) addButton.innerHTML = `Add to cart <span>· ${fmt(Number(product.price) * state.quickViewQty)}</span>`;
+    if (addButton) {
+      const needsVariant = productVariants(product).length > 0 && !selectedVariant;
+      addButton.disabled = !productCanBeOrdered(product) || state.quickViewQty > maxAdd || needsVariant;
+      addButton.innerHTML = `${needsVariant ? 'Choose an option first' : 'Add to cart'} <span>· ${fmt(unitPrice * state.quickViewQty)}</span>`;
+    }
     const buttons = document.querySelectorAll('[data-quick-qty]');
     if (buttons[0]) buttons[0].disabled = state.quickViewQty <= 1;
     if (buttons[1]) buttons[1].disabled = state.quickViewQty >= maxAdd;
@@ -523,8 +624,8 @@ document.addEventListener('click', async (e) => {
   }
   if (target.hasAttribute('data-quick-add')) {
     const product = state.quickViewProduct;
-    if (!product || product.stock < 1) return;
-    addToCart(product.id, state.quickViewQty, product);
+    if (!product || !productCanBeOrdered(product) || (productVariants(product).length > 0 && !variantFor(product, state.quickViewVariantId))) return;
+    addToCart(product.id, state.quickViewQty, product, state.quickViewVariantId);
     closeAll();
     return;
   }
@@ -537,8 +638,8 @@ document.addEventListener('click', async (e) => {
     return;
   }
   if (target.id === 'loadMoreProducts') { await loadProductsPage(false); return; }
-  if (target.dataset.qty)      { setQty(target.dataset.qty, Number(target.dataset.change)); return; }
-  if (target.dataset.remove)   { state.cart = state.cart.filter(i => i.productId !== target.dataset.remove); saveCart(); renderCart(); return; }
+  if (target.dataset.qty)      { setQty(target.dataset.qty, Number(target.dataset.change), target.dataset.variantId || ''); return; }
+  if (target.dataset.remove)   { const variantId = target.dataset.removeVariant || ''; state.cart = state.cart.filter(i => !(i.productId === target.dataset.remove && (i.variantId || '') === variantId)); saveCart(); renderCart(); return; }
   switch (target.id || target.dataset.action) {
     case 'focusSearch':    $('#searchInput').focus(); $('#products').scrollIntoView({behavior:'smooth'}); break;
     case 'accountBtn': case 'open-account': accountModal(); break;
@@ -577,13 +678,14 @@ $('#year').textContent = new Date().getFullYear();
 updateCartBadge();
 
 function applyStoreConfig(config) {
-  if (!config) return;
-  state.storeConfig    = config;
+  state.storeConfig    = config && typeof config === 'object' ? config : {};
   state.googleClientInitialized = '';
-  state.paymentMethods = config.paymentMethods || [];
+  state.paymentMethods = state.storeConfig.paymentMethods || [];
+  syncGoogleSignInOption();
+  if (!config) return;
   const address = $('#footerStoreAddress'), phone = $('#footerStorePhone');
-  if (address) { address.textContent = config.storeAddress||''; address.href = `https://maps.google.com/?q=${encodeURIComponent(config.storeAddress||'')}`; }
-  if (phone) { const v = String(config.storePhone||''); const d = v.replace(/\D/g,''); const dial = v.startsWith('+') ? `+${d}` : d.startsWith('0') ? `+250${d.slice(1)}` : `+${d}`; phone.textContent = v; phone.href = `tel:${dial}`; }
+  if (address) { address.textContent = state.storeConfig.storeAddress||''; address.href = `https://maps.google.com/?q=${encodeURIComponent(state.storeConfig.storeAddress||'')}`; }
+  if (phone) { const v = String(state.storeConfig.storePhone||''); const d = v.replace(/\D/g,''); const dial = v.startsWith('+') ? `+${d}` : d.startsWith('0') ? `+250${d.slice(1)}` : `+${d}`; phone.textContent = v; phone.href = `tel:${dial}`; }
 }
 
 (async () => {
@@ -595,6 +697,8 @@ function applyStoreConfig(config) {
     applyStoreConfig(config);
     renderCategories();
     await loadProductsPage(true);
+    const requestedQuickView = new URLSearchParams(location.search).get('quickView');
+    if (requestedQuickView) void openProductQuickView(requestedQuickView);
     // Validate and restore session via /me (cookie is sent automatically)
     try {
       const { user } = await api('/me');
