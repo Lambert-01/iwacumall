@@ -66,7 +66,6 @@ async function loadStats() {
 // ─── Orders ───────────────────────────────────────────────────────────────────
 
 let adminOrders = [];
-let adminOrdersHasMore = false;
 let adminOrdersLoading = false;
 let adminOrdersQueuedPage = null;
 let adminOrdersOpenCount = 0;
@@ -180,14 +179,13 @@ async function loadAdminOrders(requestedPage = 1) {
   if ($('#nextAdminOrders')) $('#nextAdminOrders').disabled = true;
   try {
     const result = await api(`/admin/orders?${params}`);
-    if (page > result.totalPages && result.total > 0) {
+    if (page > result.totalPages) {
       adminOrdersQueuedPage = result.totalPages;
       return;
     }
     adminOrders = result.orders || [];
     adminOrdersPage = result.page || page;
     adminOrdersTotal = Number(result.total || 0);
-    adminOrdersHasMore = result.hasMore === true;
     adminOrdersOpenCount = Number(result.openCount || 0);
     renderAdminOrders();
   } finally {

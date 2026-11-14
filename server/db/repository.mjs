@@ -370,7 +370,9 @@ export const products = {
     if (condition === 'new') query.isSecondHand = { $ne: true };
     if (search) {
       const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-      query.$or = [{ name: re }, { description: re }];
+      const categorySearch = search.trim().replace(/\s+/g, '-');
+      const categoryRe = new RegExp(categorySearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      query.$or = [{ name: re }, { description: re }, { categorySlug: categoryRe }];
     }
 
     const effectiveLimit = Math.min(200, Math.max(1, Number(limit) || 80));
