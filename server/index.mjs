@@ -1141,8 +1141,8 @@ async function api(req, res, url) {
     const categorySlug = cleanText(url.searchParams.get('category') || '', 60);
     const requestedStatus = url.searchParams.get('status') || 'all';
     const adminStatus = ['listed', 'unavailable', 'deleted'].includes(requestedStatus) ? requestedStatus : 'all';
-    const rawLimit = Number(url.searchParams.get('limit'));
-    const rawPage = Number(url.searchParams.get('page'));
+    const rawLimit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : Number.NaN;
+    const rawPage = url.searchParams.has('page') ? Number(url.searchParams.get('page')) : Number.NaN;
     const limit = Number.isSafeInteger(rawLimit) ? Math.min(100, Math.max(1, rawLimit)) : 10;
     const page = Number.isSafeInteger(rawPage) ? Math.max(1, Math.min(1_000_000, rawPage)) : 1;
     const result = await products.list({ limit, page, includeInactive: true, adminStatus, search: search || undefined, categorySlug: categorySlug || undefined });
