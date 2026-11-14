@@ -6,7 +6,7 @@ const esc = (val) => String(val ?? '').replace(/[&<>"']/g,(c)=>({'&':'&amp;','<'
 // Browser sessions stay in HttpOnly cookies. Only the native mobile client
 // requests a bearer token; the storefront keeps user display data in sessionStorage.
 const state = {
-  products: [], categories: [], paymentMethods: [], filter: 'all', query: '',
+  products: [], categories: [], paymentMethods: [], filter: 'all', query: '', condition: 'all', sort: 'featured',
   productCache: new Map(),
   productPage: 1, productTotal: 0, totalPages: 1, productsLoading: false, productRequestId: 0,
   cart: JSON.parse(sessionStorage.getItem('iwm_cart') || localStorage.getItem('iwm_cart') || '[]'),
@@ -126,29 +126,31 @@ function renderProducts() {
   const items = state.products;
   $('#productsGrid').innerHTML = items.length ? items.map(productCard).join('') : '<div class="empty-state">No products match your search. Try another category.</div>';
   $('#resultCount').textContent = `${state.productTotal} product${state.productTotal===1?'':'s'}`;
-  const loadMore = $('#loadMoreProducts');
-  if (loadMore) {
-    loadMore.hidden = state.products.length >= state.productTotal;
-    loadMore.disabled = state.productsLoading;
-    loadMore.textContent = state.productsLoading ? 'Loading…' : 'Load more products';
-  }
+  const pager = $('#productsPagination');
+  const previous = $('#previousProducts'), next = $('#nextProducts');
+  if (pager) pager.hidden = state.totalPages <= 1;
+  if (previous) previous.disabled = state.productsLoading || state.productPage <= 1;
+  if (next) next.disabled = state.productsLoading || state.productPage >= state.totalPages;
+  const pageInfo = $('#productsPageInfo');
+  if (pageInfo) pageInfo.textContent = state.productsLoading ? 'Loading products…' : `Page ${state.productPage} of ${state.totalPages}`;
   renderChips();
 }
 
-async function loadProductsPage(reset = true) {
-  if (!reset && state.productsLoading) return;
-  if (reset) state.productRequestId++;
+async function loadProductsPage(requestedPage = 1) {
+  if (state.productsLoading) return;
+  state.productRequestId++;
   const requestId = state.productRequestId;
-  const page = reset ? 1 : state.productPage + 1;
+  const page = Math.max(1, Math.min(state.totalPages || 1, Number(requestedPage) || 1));
   state.productsLoading = true;
   renderProducts();
-  const params = new URLSearchParams({ limit: '100', page: String(page) });
+  const params = new URLSearchParams({ limit: '12', page: String(page), sort: state.sort });
   if (state.filter !== 'all') params.set('category', state.filter);
   if (state.query) params.set('search', state.query);
+  if (state.condition !== 'all') params.set('condition', state.condition);
   try {
     const result = await api(`/products?${params}`);
     if (requestId !== state.productRequestId) return;
-    state.products = reset ? result.products : [...state.products, ...result.products];
+    state.products = result.products;
     state.productPage = result.page;
     state.productTotal = result.total;
     state.totalPages = result.totalPages;
@@ -633,11 +635,12 @@ document.addEventListener('click', async (e) => {
     state.filter = target.dataset.category || target.dataset.filter;
     const nextPath = state.filter === 'all' ? '/shop' : `/categories/${encodeURIComponent(state.filter)}`;
     history.pushState({}, '', nextPath);
-    await loadProductsPage(true);
+    await loadProductsPage(1);
     if (target.dataset.category) $('#products').scrollIntoView({behavior:'smooth'});
     return;
   }
-  if (target.id === 'loadMoreProducts') { await loadProductsPage(false); return; }
+  if (target.id === 'previousProducts') { await loadProductsPage(state.productPage - 1); return; }
+  if (target.id === 'nextProducts') { await loadProductsPage(state.productPage + 1); return; }
   if (target.dataset.qty)      { setQty(target.dataset.qty, Number(target.dataset.change), target.dataset.variantId || ''); return; }
   if (target.dataset.remove)   { const variantId = target.dataset.removeVariant || ''; state.cart = state.cart.filter(i => !(i.productId === target.dataset.remove && (i.variantId || '') === variantId)); saveCart(); renderCart(); return; }
   switch (target.id || target.dataset.action) {
@@ -667,12 +670,20 @@ let searchTimer;
 $('#searchInput').addEventListener('input', (e) => {
   state.query = e.target.value.trim();
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => { void loadProductsPage(true); }, 250);
+  searchTimer = setTimeout(() => { void loadProductsPage(1); }, 250);
+});
+$('#conditionFilter')?.addEventListener('change', event => {
+  state.condition = event.target.value;
+  void loadProductsPage(1);
+});
+$('#sortFilter')?.addEventListener('change', event => {
+  state.sort = event.target.value;
+  void loadProductsPage(1);
 });
 window.addEventListener('popstate', () => {
   const match = location.pathname.match(/^\/categories\/([^/]+)$/);
   state.filter = match ? decodeURIComponent(match[1]) : 'all';
-  void loadProductsPage(true);
+  void loadProductsPage(1);
 });
 $('#year').textContent = new Date().getFullYear();
 updateCartBadge();
@@ -696,7 +707,7 @@ function applyStoreConfig(config) {
     state.categories = categories.categories;
     applyStoreConfig(config);
     renderCategories();
-    await loadProductsPage(true);
+    await loadProductsPage(1);
     const requestedQuickView = new URLSearchParams(location.search).get('quickView');
     if (requestedQuickView) void openProductQuickView(requestedQuickView);
     // Validate and restore session via /me (cookie is sent automatically)
