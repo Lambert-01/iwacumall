@@ -309,6 +309,7 @@ test('checkout atomically records invoice delivery and PDF endpoint returns a PD
   assert.match(response.headers.get('content-type') || '', /application\/pdf/);
   const bytes = Buffer.from(await response.arrayBuffer());
   assert.equal(bytes.subarray(0, 5).toString(), '%PDF-');
+  assert.ok(bytes.includes(Buffer.from('/Subtype /Image')), 'PDF invoice should embed the store logo');
 });
 
 test('outbox sends both copies with the same invoice PDF and records delivery', async () => {
@@ -330,6 +331,12 @@ test('outbox sends both copies with the same invoice PDF and records delivery', 
   assert.deepEqual(messages.map(message => message.to).sort(), ['buyer@test.example', 'store@test.example']);
   assert.equal(messages[0].attachments[0].contentType, 'application/pdf');
   assert.deepEqual(messages[0].attachments[0].content, messages[1].attachments[0].content);
+  const customerMessage = messages.find(message => message.to === 'buyer@test.example');
+  assert.match(customerMessage.html, /cid:iwacumall-logo/);
+  assert.match(customerMessage.html, /Customer Care/);
+  assert.match(customerMessage.html, /Kicukiro, main road, Kigali, Rwanda/);
+  assert.match(customerMessage.html, /Payment reference/);
+  assert.ok(customerMessage.attachments.some(attachment => attachment.cid === 'iwacumall-logo'));
 });
 
 test('fresh database bootstrap keeps token TTL indexes off the users collection', async () => {

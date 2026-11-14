@@ -4,6 +4,9 @@
  */
 
 import PDFDocument from 'pdfkit';
+import { readFileSync } from 'node:fs';
+
+const BRAND_LOGO = readFileSync(new URL('../../web/assets/favicon.png', import.meta.url));
 
 /**
  * Format currency in RWF
@@ -64,33 +67,38 @@ export function generateInvoicePdf(order, storeConfig = {}) {
       const goldAccent  = '#EDA900';
 
       // ─── Header ─────────────────────────────────────────────────────────────
-      doc.rect(40, 40, 515, 65).fill(lightBg);
+      doc.rect(40, 40, 515, 78).fill(lightBg);
+
+      doc.image(BRAND_LOGO, 52, 50, { fit: [54, 54] });
 
       doc.fillColor(darkNavy).fontSize(22).font('Helvetica-Bold')
-        .text(storeName, 55, 52, { width: 250, ellipsis: true });
+        .text(storeName, 114, 55, { width: 200, ellipsis: true });
 
       doc.fillColor(primaryBlue).fontSize(10).font('Helvetica-Bold')
-        .text('ORDER INVOICE & PAYMENT INSTRUCTIONS', 55, 80);
+        .text('ORDER INVOICE & PAYMENT GUIDE', 114, 83, { width: 205, ellipsis: true });
 
       // Store contact info (right side of header)
       doc.fillColor(textGray).fontSize(8.5).font('Helvetica')
-        .text(storeAddress, 330, 50, { align: 'right', width: 210, ellipsis: true })
-        .text(`Phone: ${storePhone}`, 330, 64, { align: 'right', width: 210, ellipsis: true })
-        .text(storeEmail ? `Email: ${storeEmail}` : '', 330, 78, { align: 'right', width: 210, ellipsis: true });
+        .text(storeAddress, 342, 47, { align: 'right', width: 198, height: 22, ellipsis: true })
+        .text(`Phone: ${storePhone}`, 342, 73, { align: 'right', width: 198, ellipsis: true })
+        .text(storeEmail ? `Email: ${storeEmail}` : '', 342, 88, { align: 'right', width: 198, ellipsis: true });
 
       doc.moveDown(2);
 
       // ─── Metadata block ──────────────────────────────────────────────────────
-      const startY = 120;
-      doc.rect(40, startY, 250, 85).strokeColor('#E2E8F0').lineWidth(1).stroke();
-      doc.rect(295, startY, 260, 85).strokeColor('#E2E8F0').lineWidth(1).stroke();
+      const startY = 128;
+      doc.rect(40, startY, 250, 116).strokeColor('#E2E8F0').lineWidth(1).stroke();
+      doc.rect(295, startY, 260, 116).strokeColor('#E2E8F0').lineWidth(1).stroke();
 
       // Left box: Customer Details
-      doc.fillColor(darkNavy).fontSize(10).font('Helvetica-Bold').text('BILLED TO:', 50, startY + 10);
+      doc.fillColor(darkNavy).fontSize(10).font('Helvetica-Bold').text('CUSTOMER & DELIVERY:', 50, startY + 10);
       doc.fillColor('#1A202C').fontSize(9).font('Helvetica')
         .text(order.customerName || 'Customer', 50, startY + 26)
-        .text(`Phone: ${order.phone || '—'}`, 50, startY + 39)
-        .text(`Address: ${order.address || '—'}, ${order.city || 'Kigali'}`, 50, startY + 52, { width: 230 });
+        .text(`Email: ${order.customerEmail || '—'}`, 50, startY + 39, { width: 230, ellipsis: true })
+        .text(`Phone: ${order.phone || '—'}`, 50, startY + 52, { width: 230, ellipsis: true });
+      doc.fillColor(darkNavy).fontSize(8).font('Helvetica-Bold').text('DELIVER TO', 50, startY + 68);
+      doc.fillColor('#1A202C').fontSize(8.5).font('Helvetica')
+        .text([order.address, order.city, 'Rwanda'].filter(Boolean).join(', ') || '—', 50, startY + 81, { width: 230, height: 28 });
 
       // Right box: Invoice Details
       doc.fillColor(darkNavy).fontSize(10).font('Helvetica-Bold').text('INVOICE DETAILS:', 305, startY + 10);
@@ -101,11 +109,13 @@ export function generateInvoicePdf(order, storeConfig = {}) {
         .text(formatDate(order.createdAt), 410, startY + 39)
         .text(`Payment Status:`, 305, startY + 52)
         .fillColor(order.paymentStatus === 'PAID' ? '#22543D' : '#975A16').font('Helvetica-Bold')
-        .text((order.paymentStatus || 'PENDING').replace(/_/g, ' '), 410, startY + 52);
+        .text((order.paymentStatus || 'PENDING').replace(/_/g, ' '), 410, startY + 52)
+        .fillColor('#1A202C').font('Helvetica').text('Payment Method:', 305, startY + 68)
+        .text(order.paymentMethodSnapshot?.label || order.paymentMethodLabel || 'Manual payment', 410, startY + 68, { width: 135, ellipsis: true });
 
       if (order.paymentDeadline && order.paymentStatus === 'PENDING') {
         doc.fillColor('#C53030').fontSize(8).font('Helvetica-Bold')
-          .text(`Pay Before: ${formatDate(order.paymentDeadline)}`, 305, startY + 68);
+          .text(`Payment deadline: ${formatDate(order.paymentDeadline)}`, 305, startY + 86, { width: 235, ellipsis: true });
       }
 
       // ─── Items Table ─────────────────────────────────────────────────────────
@@ -117,7 +127,7 @@ export function generateInvoicePdf(order, storeConfig = {}) {
           .text('UNIT PRICE', 390, y + 6, { width: 75, align: 'right' })
           .text('AMOUNT', 475, y + 6, { width: 70, align: 'right' });
       };
-      let tableY = 225;
+      let tableY = 255;
       drawItemsHeader(tableY);
 
       tableY += 24;
@@ -230,7 +240,7 @@ export function generateInvoicePdf(order, storeConfig = {}) {
       for (let page = pages.start; page < pages.start + pages.count; page++) {
         doc.switchToPage(page);
         doc.fontSize(7.5).fillColor('#718096').font('Helvetica')
-          .text(`${storeName} — ${storeAddress}. Tel: ${storePhone}. Invoice ${order.invoiceNumber}. Page ${page - pages.start + 1} of ${pages.count}.`, 40, 780, { align: 'center', width: 515, ellipsis: true });
+          .text(`Thank you for choosing ${storeName}. ${storeAddress}. Tel: ${storePhone}.${storeEmail ? ` Email: ${storeEmail}.` : ''} Invoice ${order.invoiceNumber}. Page ${page - pages.start + 1} of ${pages.count}.`, 40, 780, { align: 'center', width: 515, ellipsis: true });
       }
 
       doc.end();

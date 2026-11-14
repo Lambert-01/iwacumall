@@ -15,8 +15,13 @@
     }
     .invoice-wrapper { max-width: 760px; margin: 0 auto; padding: 2rem 1rem; }
     .invoice-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 1.5rem; }
-    .invoice-brand img { width: 40px; height: 40px; }
+    .invoice-brand img { width: 52px; height: 52px; border-radius: 12px; }
     .invoice-brand strong { font-size: 1.5rem; }
+    .invoice-parties { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; margin: 1.25rem 0; }
+    .invoice-party { min-width: 0; padding: 1rem; border: 1px solid #e8edf6; border-radius: 12px; background: #fbfcff; }
+    .invoice-party h3 { margin: 0 0 .55rem; color: #081F62; font-size: .78rem; letter-spacing: .06em; text-transform: uppercase; }
+    .invoice-party p { margin: .22rem 0; color: #53627b; font-size: .88rem; line-height: 1.5; overflow-wrap: anywhere; }
+    .invoice-party p:first-of-type { color: #1b2b49; font-weight: 700; }
     .invoice-box { background: white; border-radius: 16px; box-shadow: 0 4px 24px rgba(8,31,98,.08); padding: 2rem; margin-bottom: 1.5rem; }
     .invoice-title { font-size: 2rem; font-weight: 900; color: #081F62; margin-bottom: .3rem; }
     .invoice-num { font-size: .9rem; color: #8190aa; margin-bottom: 1rem; }
@@ -32,6 +37,7 @@
     .status-PAID     { background: #d1f5e3; color: #155724; }
     .status-EXPIRED  { background: #f8d7da; color: #721c24; }
     .status-VOID     { background: #e9ecef; color: #495057; }
+    @media(max-width:560px) { .invoice-parties { grid-template-columns: 1fr; } .invoice-box { padding: 1.2rem; } }
   </style>
 </head>
 <body>
@@ -58,6 +64,23 @@
         <div>
           <span class="status-pill" id="paymentStatusPill">PENDING</span>
           <span id="fulfillmentStatusText" style="margin-left:.5rem;color:#8190aa;font-size:.88rem;"></span>
+        </div>
+
+        <div class="invoice-parties">
+          <section class="invoice-party">
+            <h3>Customer</h3>
+            <p id="customerName">—</p>
+            <p id="customerEmail">—</p>
+            <p id="customerPhone">—</p>
+          </section>
+          <section class="invoice-party">
+            <h3>Deliver to</h3>
+            <p id="customerAddress">—</p>
+            <h3 style="margin-top:.8rem">Store contact</h3>
+            <p id="storeAddress">—</p>
+            <p id="storePhone">—</p>
+            <p id="storeEmail">—</p>
+          </section>
         </div>
 
         <hr style="margin: 1.2rem 0; border: none; border-top: 1px solid #e8edf6;">
@@ -97,9 +120,6 @@
         <a class="btn btn-subtle" href="/orders">View all orders</a>
       </div>
 
-      <p style="color:#8190aa;font-size:.8rem;margin-top:1rem;">
-        <span id="storeAddress"></span> &nbsp;·&nbsp; <span id="storePhone"></span>
-      </p>
     </div>
     <div id="invoiceError" hidden class="empty-state"></div>
   </main>

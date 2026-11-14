@@ -39,6 +39,7 @@ async function loadInvoice() {
     if (cfg.storeName) $('#storeName').textContent = cfg.storeName;
     if (cfg.storeAddress) $('#storeAddress').textContent = cfg.storeAddress;
     if (cfg.storePhone)   $('#storePhone').textContent   = cfg.storePhone;
+    if (cfg.storeEmail)   $('#storeEmail').textContent   = cfg.storeEmail;
   } catch {}
 }
 
@@ -53,6 +54,10 @@ function renderInvoice(order) {
 
   $('#invoiceNumber').textContent = esc(order.invoiceNumber || '—');
   $('#invoiceDate').textContent   = formatDate(order.createdAt);
+  $('#customerName').textContent = order.customerName || '—';
+  $('#customerEmail').textContent = order.customerEmail || '—';
+  $('#customerPhone').textContent = order.phone || '—';
+  $('#customerAddress').textContent = [order.address, order.city, 'Rwanda'].filter(Boolean).join(', ') || '—';
 
   // Payment status pill
   const statusEl = $('#paymentStatusPill');
