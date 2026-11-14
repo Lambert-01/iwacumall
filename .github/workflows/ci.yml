@@ -1,0 +1,84 @@
+name: IwacuMall CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: iwacumall-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Node API and isolated integration suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Check JavaScript syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in server/*.mjs server/db/*.mjs scripts/*.mjs web/*.js; do
+            node --check "$file"
+          done
+
+      - name: Run isolated API integration suite
+        run: npm test
+
+  android:
+    name: Flutter analysis and Android debug build
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Java for Android Gradle
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.27.4
+          cache: true
+          pub-cache: true
+
+      - name: Resolve Flutter dependencies
+        working-directory: mobile
+        run: flutter pub get
+
+      - name: Analyze Flutter application
+        working-directory: mobile
+        run: flutter analyze --no-pub
+
+      - name: Build arm64 debug APK
+        working-directory: mobile
+        run: flutter build apk --debug --target-platform android-arm64
+
+      - name: Retain debug APK for review
+        uses: actions/upload-artifact@v7
+        with:
+          name: iwacumall-android-debug-arm64
+          path: mobile/build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7

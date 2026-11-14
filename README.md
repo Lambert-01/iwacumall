@@ -1,135 +1,81 @@
-# IwacuMall — E-commerce Website + API + Android Application
+# IwacuMall
 
-An integrated **source-code MVP** for the IwacuMall online store. It includes a responsive shopping website, an HTTP backend with a persistent SQLite database, an administrator dashboard and a Flutter Android shopping app wired to the **same backend**.
+IwacuMall is a responsive shopping website and Flutter Android client backed by a Node.js API and MongoDB. Checkout creates a customer invoice with manual payment instructions; the store confirms incoming payments in the admin dashboard.
 
-> **Status:** The Node.js API has passed automated end-to-end tests; browser assets and routes are present. The Android source has **not** been compiled or tested on a device in this environment (Flutter SDK is unavailable). This is not a deployed, payment-enabled, Play-Store-approved or production-hardened release.
+## Current implementation
 
-## What is included
+- Responsive catalogue, categories, search, cart, customer accounts and order history.
+- MongoDB Atlas persistence, password hashing, HttpOnly browser sessions, CSRF protection and secure token storage in the Android app.
+- Email verification, password reset, administrator authenticator MFA and shared rate limiting across API instances.
+- Server-priced checkout, stock reservation, configurable delivery/tax/deadline settings, printable invoices, manual payment confirmation and scheduled expiration with stock restoration for unpaid overdue orders.
+- Admin screens for orders, fulfilment, products, categories, store settings and payment methods.
+- Draft privacy, sale terms and delivery-policy pages that require owner completion before publication.
 
-| Component | Implemented |
-|---|---|
-| Website storefront | Responsive landing page, category navigation, search, product cards, shopping cart |
-| Customer accounts | Register, login, logout, saved sessions, protected order history |
-| Checkout | Cash-on-delivery orders with customer contact/address and server-side stock validation |
-| Database | SQLite schema for users, session tokens, categories, products, orders, line items |
-| Administration | Product creation, stock changes, hide products, category creation, order statuses, basic metrics |
-| Android app source | Flutter shop, search/category filters, product cards, cart, registration/login, checkout, order tracking |
-| Branding | Blue/yellow IwacuMall logo integrated into web and mobile |
-| Testing | Automated Node API workflow including stock restoration on cancellation |
-| Deployment guidance | VPS/Nginx, HTTPS, database persistence, mobile build instructions |
+The product catalogue contains demonstration items until the owner replaces them. The project has not been deployed and does not yet have a confirmed production domain, SMTP provider, payment accounts, delivery coverage or approved legal terms.
 
-### Deliberately not included / pending client inputs
+## Requirements
 
-**Not included yet:** live payment integrations (MTN MoMo, Airtel, cards), actual inventory/photos/prices, real delivery fees or tracking, email/SMS notifications, courier systems, Android APK/AAB build, Play Store publication, iOS app, inventory imports, or operational privacy/terms documents. These require additional client decisions, integration credentials, testing and/or separate scope approval. Seed products and their prices are **demonstrations**, not the client's real catalog.
+- Node.js `>=22.13.0`
+- npm
+- MongoDB Atlas or a local MongoDB replica set (transactions require a replica set)
+- Flutter and Android SDK for Android builds
 
-## Project structure
-
-```text
-IwacuMall_FullStack_v1/
-├── server/                 Node.js 22+ HTTP JSON API, SQLite schema, auth and orders
-│   ├── index.mjs
-│   ├── db.mjs
-│   └── security.mjs
-├── web/                    Fast, responsive HTML/CSS/JS storefront served by Node
-│   ├── index.html          Shop
-│   ├── app.js              Shop interactions, auth, cart, checkout
-│   ├── admin.html          Administration
-│   ├── dashboard.js        Admin and order history
-│   ├── orders.html         Customer order history
-│   ├── styles.css          Responsive blue/gold design system
-│   └── assets/             Official selected logo + sample demo product art
-├── mobile/                 Flutter source (Android native scaffold generated locally)
-│   ├── pubspec.yaml
-│   ├── assets/logo.png
-│   └── lib/main.dart
-├── tests/api.test.mjs      Functional API integration suite
-├── docs/                   Architecture, deployment, acceptance checklist
-├── package.json            No npm dependencies required to run web/API
-└── .env.example
-```
-
-## 1. Run the website and API on a Mac, Windows or Linux computer
-
-**Requirements:** Node.js **22.13+**, a terminal, and a modern browser. No npm packages required for the server or website.
+## Local setup
 
 ```bash
-cd IwacuMall_FullStack_v1
+nvm install
+nvm use
 cp .env.example .env
-```
-
-Open `.env` and set a strong and unique `ADMIN_PASSWORD` (minimum 12 characters); set the real admin email/name. On Windows, copy the file using File Explorer or `copy .env.example .env`.
-
-```bash
+# Edit .env with an available MongoDB URI and local development settings.
+npm ci
 npm start
 ```
 
-Now open:
+Open the storefront at `http://127.0.0.1:4000/`. Admin access uses the first administrator configured with `ADMIN_EMAIL` and a unique `ADMIN_PASSWORD`. After signing in, complete authenticator MFA before using admin features.
 
-- Storefront: `http://127.0.0.1:4000/`
-- Admin dashboard: `http://127.0.0.1:4000/admin`
-- Order history: `http://127.0.0.1:4000/orders`
-- API health check: `http://127.0.0.1:4000/api/health`
+Configure a payment method and the delivery fee and payment deadline in **Admin → Store settings**. Checkout stays disabled until a payment method, delivery fee and deadline are available.
 
-**Initial admin:** When the server first starts, the email and password in `.env` create the administrator if the account does not already exist. If an admin account exists, restarting does not reset its password. Use that account on the storefront login to access `/admin`.
+Do not commit `.env`. The real `.env` file is not included in source review or setup guidance. Never paste database passwords, SMTP credentials or admin passwords into source files or issues.
 
-**Local database:** `./data/iwacumall.sqlite`, created automatically. Backup this database regularly when using real data. To reset demo data locally, stop the server and delete this file **only if you intend to permanently delete the local accounts and orders**.
+## Environment configuration
 
-### Run automated API tests
+`MONGODB_URI`, `MONGODB_DB_NAME`, `COOKIE_SECRET`, `ADMIN_EMAIL`, `ADMIN_PASSWORD` and `APP_BASE_URL` are required for production. Production also requires HTTPS, a real store address/phone, `EMAIL_VERIFICATION_REQUIRED=true`, and working SMTP settings. Use unique random secrets and URL-encode special characters in Atlas credentials.
+
+Store address, phone, email, flat delivery fee, optional tax rate and payment deadline can be managed in the admin settings page. Payment instructions and account details are stored per payment method. No payment gateway is connected; staff must verify payments manually.
+
+## Development and migration
 
 ```bash
+npm run dev
 npm test
 ```
 
-The tests use a temporary isolated database and do not modify your real store database.
+The API tests use an isolated in-memory MongoDB when `mongodb-memory-server` can start. Do not point tests at production data. A dry-run SQLite importer is available with `npm run migrate`. Cancelled or canceled legacy orders map to `CANCELLED` / `VOID`; the importer leaves product stock as recorded in SQLite and does not restore inventory a second time. Review the cancelled-order count and confirm the old database already reflects cancellations, then take a verified SQLite backup before any remote write. Remote migration writes require the explicit `--force` flag:
 
-## 2. Build the Android app (Flutter)
+```bash
+npm run migrate:write -- --force
+```
 
-Flutter is not installed in this delivery environment; the Android app is **Flutter source code** and requires the Android project scaffold on the developer machine.
+Run that command only after verifying the target cluster, database name, backup and dry-run report.
 
-Install [Flutter](https://docs.flutter.dev/get-started/install), Android Studio and Android SDK, then:
+## Android client
+
+The source is in `mobile/`. Generate the Android project scaffold once, resolve the Flutter dependencies, and run against the local API:
 
 ```bash
 cd mobile
-flutter create --platforms=android --org com.iwacumall .
 flutter pub get
 flutter run --dart-define=IWACUMALL_API_URL=http://10.0.2.2:4000
 ```
 
-`10.0.2.2` is the Android emulator's alias for the Mac/PC localhost. For a **real Android phone**, start the backend using `HOST=0.0.0.0` on the computer and pass its LAN IP:
+The Android platform scaffold is already included. The URL above is for an Android emulator. For a physical phone on the same Wi-Fi, set the development server `HOST=0.0.0.0`, allow it through the computer firewall, and use `http://<computer-LAN-IP>:4000`. Debug builds permit local HTTP; release builds require HTTPS.
 
-```bash
-flutter run --dart-define=IWACUMALL_API_URL=http://192.168.1.100:4000
-```
+For a release build, the app refuses a non-HTTPS API URL. Use the real verified API domain and configure Android signing, app identity, store listing and privacy disclosures before publishing.
 
-Replace that sample IP with the computer's actual LAN address. Ensure both devices use the same private network and firewall rules permit development access. For local HTTP testing, temporarily allow cleartext traffic in your generated Android manifest; **never enable broad cleartext HTTP in the production version**. See `docs/DEPLOYMENT.md`.
+## Deployment and review
 
-For the published app (once HTTPS, Android signing and privacy compliance are ready):
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md), and [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md). Configure a domain and TLS, Atlas network access and backups, SMTP and sender DNS, monitoring, incident contacts, and restore procedures before launch.
 
-```bash
-flutter build appbundle --release --dart-define=IWACUMALL_API_URL=https://YOUR_DOMAIN
-```
+GitHub Actions runs the isolated API integration suite and JavaScript syntax checks on pushes and pull requests. A separate job analyzes Flutter and builds an unsigned arm64 debug APK, retained as a seven-day workflow artifact. CI uses no production secrets and does not deploy the site or publish the app.
 
-Google Play publication requires a developer account, signing, screenshots, app content declarations and Google review/possibly testing.
-
-## 3. Production hosting
-
-The website and API are **served from the same Node process** on port 4000, which simplifies routing and security. Use a reverse proxy such as Nginx with TLS. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for a working example and a hardening checklist.
-
-## 4. Architecture and endpoints
-
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for request flows and the complete endpoint list.
-
-## 5. Before a client handover
-
-See [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md) for a customer-to-admin acceptance checklist and outstanding items. Replace the demonstration catalog and policy text with approved store information before launch.
-
-## Security and privacy
-
-- Passwords use per-user salted **scrypt** hashes; sessions are stored by SHA-256 token hash.
-- Login/registration are rate-limited in memory; all database queries use parameters.
-- Order pricing and stock come from the server, not browser/mobile values; order inventory updates use SQLite transactions.
-- Admin routes require the server-side `ADMIN` role.
-- User tokens are currently stored in browser `localStorage` and Flutter `shared_preferences` to keep the starter simple. **Before handling real customer information, replace with a secure, reviewed session storage approach** (for example HttpOnly/SameSite cookies with CSRF protection for web and OS secure storage for mobile).
-- The built-in `node:sqlite` API is experimental on the tested Node 22 runtime; review long-term database/platform choice for production scale.
-- Require HTTPS, backups, monitoring, anti-abuse controls, secure CORS, privacy notices, and a security review before public launch.
-
+The policy pages are drafts containing owner action notes. They must be completed with the seller’s legal identity, retention periods, delivery zones/times, returns/refunds and complaint rules before they are presented as final policies.

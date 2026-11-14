@@ -7,6 +7,10 @@ mobile/.dart_tool/
 mobile/.flutter-plugins*
 mobile/build/
 mobile/android/.gradle/
+mobile/android/local.properties
+mobile/android/key.properties
+mobile/android/*.jks
+mobile/android/*.keystore
 mobile/ios/Pods/
 .DS_Store
 *.log

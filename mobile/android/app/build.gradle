@@ -1,0 +1,74 @@
+plugins {
+    id "com.android.application"
+    id "kotlin-android"
+    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+def signingPropertiesFile = rootProject.file("key.properties")
+def signingProperties = new Properties()
+if (signingPropertiesFile.exists()) {
+    signingPropertiesFile.withInputStream { signingProperties.load(it) }
+}
+
+android {
+    namespace = "com.iwacumall.app"
+    compileSdk = flutter.compileSdkVersion
+    ndkVersion = flutter.ndkVersion
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = JavaVersion.VERSION_1_8
+    }
+
+    defaultConfig {
+        // Confirm this package name is available and owned before store publication.
+        applicationId = "com.iwacumall.app"
+        // You can update the following values to match your application needs.
+        // For more information, see: https://flutter.dev/to/review-gradle-config.
+        minSdk = flutter.minSdkVersion
+        targetSdk = flutter.targetSdkVersion
+        versionCode = flutter.versionCode
+        versionName = flutter.versionName
+    }
+
+    signingConfigs {
+        release {
+            if (signingPropertiesFile.exists()) {
+                keyAlias = signingProperties['keyAlias']
+                keyPassword = signingProperties['keyPassword']
+                storeFile = rootProject.file(signingProperties['storeFile'])
+                storePassword = signingProperties['storePassword']
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig = signingPropertiesFile.exists() ? signingConfigs.release : null
+        }
+    }
+}
+
+tasks.configureEach {
+    def taskName = name.toLowerCase()
+    if ((taskName.startsWith('assemble') || taskName.startsWith('bundle')) && taskName.contains('release')) {
+        doFirst {
+            if (!signingPropertiesFile.exists()) {
+                throw new GradleException('Release signing is not configured. Create the ignored android/key.properties file first.')
+            }
+        }
+    }
+}
+
+flutter {
+    source = "../.."
+}
+
+dependencies {
+    implementation("androidx.core:core:1.12.0")
+}

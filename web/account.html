@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#1455D9"><meta name="description" content="Manage your IwacuMall profile, delivery addresses and signed-in devices.">
+  <title>Your account | IwacuMall</title>
+  <link rel="icon" href="/assets/favicon.png"><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/overrides.css">
+  <script type="module" src="/account.js"></script>
+</head>
+<body>
+  <div class="announcement"><span class="announcement-dot"></span> Your IwacuMall account <span class="announcement-sep">•</span> Shop with confidence <span class="announcement-dot"></span></div>
+  <header class="site-header"><div class="container header-row">
+    <a class="brand" href="/" aria-label="IwacuMall home"><img src="/assets/favicon.png" alt=""><span>Iwacu<span class="brand-accent">Mall</span><span class="brand-suffix">.com</span></span></a>
+    <a class="btn btn-subtle" href="/orders">My orders</a><a class="btn btn-primary" href="/#products">Continue shopping</a>
+  </div></header>
+  <main class="container account-page">
+    <div class="section-label">ACCOUNT SETTINGS</div><h1>Make it yours</h1>
+    <p class="account-lead">Update your profile, save delivery details and review your active sessions.</p>
+    <p id="accountStatus" class="account-status" role="status" aria-live="polite">Loading your account…</p>
+    <div id="accountContent" hidden>
+      <section class="account-card">
+        <div class="admin-card-title"><span class="admin-card-icon">◉</span><div><h2>Profile</h2><p>Your name is shown on orders and invoices.</p></div></div>
+        <form id="profileForm" class="account-form"><label>Full name<input id="profileName" name="name" class="form-control" minlength="2" maxlength="100" required></label><label>Email address<input id="profileEmail" class="form-control" readonly></label><button class="btn btn-primary" type="submit">Save profile</button></form>
+      </section>
+      <section class="account-card">
+        <div class="admin-card-title"><span class="admin-card-icon">⌖</span><div><h2>Saved delivery addresses</h2><p>Choose a saved address at checkout.</p></div></div>
+        <div id="savedAddresses" class="saved-address-list"></div>
+        <form id="addressForm" class="account-form">
+          <label>Address label<input name="label" class="form-control" placeholder="Home, Work…" minlength="2" maxlength="40" required></label>
+          <label>Recipient name<input name="recipientName" class="form-control" maxlength="100" required></label>
+          <div class="form-two"><label>Phone<input name="phone" class="form-control" inputmode="tel" minlength="8" maxlength="30" required></label><label>City<input name="city" class="form-control" value="Kigali" maxlength="90" required></label></div>
+          <label>Delivery address<input name="address" class="form-control" placeholder="District, sector, street or landmark" minlength="5" maxlength="180" required></label>
+          <label class="admin-check"><input type="checkbox" name="isDefault" value="true"><span>Make this my default address</span></label>
+          <button class="btn btn-primary" type="submit">Save delivery address</button>
+        </form>
+      </section>
+      <section class="account-card">
+        <div class="admin-card-title"><span class="admin-card-icon">▣</span><div><h2>Signed-in sessions</h2><p>Revoke a device you no longer use.</p></div></div>
+        <div id="accountSessions" class="account-session-list"></div>
+      </section>
+      <section class="account-card account-security-card">
+        <div class="admin-card-title"><span class="admin-card-icon">◇</span><div><h2>Security and account removal</h2><p>Password updates end your other active sessions.</p></div></div>
+        <div id="passwordTools"></div>
+        <form id="deleteAccountForm" class="account-delete-form">
+          <h3>Delete account</h3><p>Your personal profile and saved addresses will be anonymized. Order records may be retained for store records.</p>
+          <label>Type DELETE to confirm<input class="form-control" name="confirmation" autocomplete="off" required></label>
+          <label id="deletePasswordWrap">Current password<input class="form-control" name="password" type="password" autocomplete="current-password"></label>
+          <button class="btn danger-btn" type="submit">Delete my account</button>
+          <div id="googleReauthPanel" hidden><p>Confirm the Google account linked to this profile to continue:</p><div id="googleReauthButton"></div></div>
+        </form>
+      </section>
+    </div>
+  </main>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

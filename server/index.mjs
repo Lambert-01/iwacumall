@@ -1,280 +1,1543 @@
-import http from 'node:http';
+/**
+ * server/index.mjs — IwacuMall API server (MongoDB edition)
+ *
+ * Node.js ≥ 22.13.0 required (see package.json engines).
+ * Uses the official MongoDB driver (no ORM).
+ * Authentication: HttpOnly cookies for browsers + Bearer tokens for mobile.
+ */
+
+import http     from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
-import { randomUUID } from 'node:crypto';
-import { db, seed, slugify } from './db.mjs';
-import { createPasswordHash, verifyPassword, issueToken, tokenHash, cleanText, validEmail } from './security.mjs';
+import { randomUUID, createHash }  from 'node:crypto';
 
-seed();
-const PORT = Number(process.env.PORT || 4000);
-const HOST = process.env.HOST || '127.0.0.1';
+import config  from './config.mjs';
+import { connectDb, dbPing, closeDb, getClient } from './db/mongo.mjs';
+import { seed }  from './db/seed.mjs';
+import { users, sessions, categories, products, orders, paymentMethods, storeSettings, adminMfa, auditLog, emailOutbox } from './db/repository.mjs';
+import { slugify } from './db/repository.mjs';
+import {
+  createPasswordHash, verifyPassword, cleanText, validEmail,
+} from './security.mjs';
+import {
+  issueToken, tokenHash, createSession,
+  ensureUser, ensureAdmin, getClientIp, rateLimit,
+  issueEmailVerificationToken, issuePasswordResetToken,
+} from './auth.mjs';
+import { generateInvoicePdf } from './pdf/invoice.mjs';
+import { generateRobotsTxt, generateSitemapXml } from './seo.mjs';
+import { startEmailOutboxWorker } from './outbox.mjs';
+import { createTotpSecret, createRecoveryCodes, hashRecoveryCode, encryptSensitiveValue, encryptTotpSecret, decryptTotpSecret, verifyTotp, totpProvisioningUri } from './mfa.mjs';
+import { verifyGoogleIdToken } from './google-auth.mjs';
+import { uploadProductImage, deleteProductImage, cloudinaryUploadEnabled } from './media.mjs';
+
+// ─── Startup ──────────────────────────────────────────────────────────────────
+
+const PORT      = config.port;
+const HOST      = config.host;
 const publicDir = resolve(process.cwd(), 'web');
-const extraOrigins = (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
-const mime = {'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.ico':'image/x-icon','.webp':'image/webp','.json':'application/json'};
-const json = (res, status, body) => {
-  res.writeHead(status, {'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});
-  res.end(JSON.stringify(body));
+const mime = {
+  '.html':'text/html; charset=utf-8',
+  '.css' :'text/css; charset=utf-8',
+  '.js'  :'text/javascript; charset=utf-8',
+  '.svg' :'image/svg+xml',
+  '.png' :'image/png',
+  '.ico' :'image/x-icon',
+  '.webp':'image/webp',
+  '.json':'application/json',
 };
-const fail = (status, message) => { const e = new Error(message); e.status = status; throw e; };
-const ensure = (condition, code, message) => { if (!condition) fail(code,message); };
 
-async function bodyJson(req) {
+// ─── HTTP helpers ─────────────────────────────────────────────────────────────
+
+function json(res, status, body) {
+  res.writeHead(status, {
+    'Content-Type' : 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'X-Robots-Tag': 'noindex, nofollow',
+  });
+  res.end(JSON.stringify(body));
+}
+
+function fail(status, message) {
+  const e = new Error(message); e.status = status; throw e;
+}
+function ensure(condition, code, message) { if (!condition) fail(code, message); }
+
+async function bodyJson(req, maxBytes = 64 * 1024) {
   let raw = '';
   for await (const chunk of req) {
     raw += chunk;
-    if (raw.length > 64 * 1024) fail(413,'Request body too large');
+    if (raw.length > maxBytes) fail(413, 'Request body too large');
   }
-  try { return JSON.parse(raw || '{}'); } catch { fail(400,'Invalid JSON body'); }
+  try { return JSON.parse(raw || '{}'); } catch { fail(400, 'Invalid JSON body'); }
 }
-function getUser(req) {
+
+// ─── CSRF ─────────────────────────────────────────────────────────────────────
+// Double-submit cookie pattern: browser must echo the csrf cookie value
+// in the X-CSRF-Token header on state-changing requests.
+
+function csrfToken() { return randomUUID(); }
+
+function verifyCsrf(req) {
+  // Bearer tokens are sent explicitly by native clients and are not ambient
+  // browser credentials, so CSRF protection applies only to cookie sessions.
+  const cookieStr = req.headers.cookie || '';
+  const hasSessionCookie = /(?:^|;\s*)iwm_session=/.test(cookieStr);
+  if (!hasSessionCookie && (req.headers.authorization || '').startsWith('Bearer ')) return;
+  const headerVal = req.headers['x-csrf-token'] || '';
+  const match = cookieStr.match(/(?:^|;\s*)iwm_csrf=([^;]+)/);
+  const cookieVal = match ? decodeURIComponent(match[1]) : '';
+  if (!headerVal || !cookieVal || headerVal !== cookieVal) {
+    fail(403, 'CSRF check failed');
+  }
+}
+
+// ─── Cookie helpers ───────────────────────────────────────────────────────────
+
+function setSessionCookie(res, token, maxAgeSeconds) {
+  const opts = [
+    `iwm_session=${token}`,
+    `Max-Age=${maxAgeSeconds}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Strict',
+    ...(config.isProduction ? ['Secure'] : []),
+  ].join('; ');
+  res.setHeader('Set-Cookie', [
+    opts,
+    // CSRF cookie (not HttpOnly so JS can read it)
+    `iwm_csrf=${csrfToken()}; Max-Age=${maxAgeSeconds}; Path=/; SameSite=Strict${config.isProduction ? '; Secure' : ''}`,
+  ]);
+}
+
+function clearSessionCookie(res) {
+  res.setHeader('Set-Cookie', [
+    'iwm_session=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict',
+    'iwm_csrf=; Max-Age=0; Path=/; SameSite=Strict',
+  ]);
+}
+
+function getSessionToken(req) {
+  // Browser: cookie; Mobile: Bearer header
+  const cookie = req.headers.cookie || '';
+  const m = cookie.match(/(?:^|;\s*)iwm_session=([^;]+)/);
+  if (m) return decodeURIComponent(m[1]);
   const auth = req.headers.authorization || '';
-  if (!auth.startsWith('Bearer ')) return null;
-  const token = auth.slice(7);
-  if (!/^[a-zA-Z0-9_-]{30,150}$/.test(token)) return null;
-  const record = db.prepare(`SELECT u.id,u.name,u.email,u.role FROM sessions s
-    JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?`)
-    .get(tokenHash(token),Math.floor(Date.now()/1000));
-  return record || null;
+  if (auth.startsWith('Bearer ')) return auth.slice(7);
+  return null;
 }
-function authUser(req, admin=false) {
-  const user = getUser(req);
-  ensure(user,401,'Please sign in to continue');
-  if (admin) ensure(user.role === 'ADMIN',403,'Administrator access required');
+
+async function withDbTransaction(work) {
+  const session = getClient().startSession();
+  try { return await session.withTransaction(() => work(session)); }
+  finally { await session.endSession(); }
+}
+
+async function getUser(req) {
+  const token = getSessionToken(req);
+  if (!token || !/^[a-zA-Z0-9_-]{30,150}$/.test(token)) return null;
+  const session = await sessions.findByToken(tokenHash(token));
+  if (!session) return null;
+  return users.findById(session.userId);
+}
+
+async function authUser(req, adminRequired = false) {
+  const user = await getUser(req);
+  ensureUser(user);
+  if (adminRequired) ensureAdmin(user);
   return user;
 }
-function session(user) {
-  const token = issueToken();
-  db.prepare('INSERT INTO sessions(token_hash,user_id,expires_at) VALUES (?,?,?)')
-    .run(tokenHash(token),user.id,Math.floor(Date.now()/1000)+60*60*24*7);
-  return {token,user:{id:user.id,name:user.name,email:user.email,role:user.role}};
-}
-function productQuery(limit=80, filter='') {
-  return `SELECT p.id,p.name,p.slug,p.description,p.price,p.stock,p.image_url AS imageUrl,
-    p.featured,p.active,c.name AS category,c.slug AS categorySlug,p.created_at AS createdAt
-    FROM products p LEFT JOIN categories c ON c.id=p.category_id ${filter} LIMIT ${limit}`;
-}
-function sanitizeProduct(input, partial=false) {
+
+// ─── Product helpers ──────────────────────────────────────────────────────────
+
+async function sanitizeProduct(input, partial = false, existing = null) {
   const fields = {};
-  for (const k of ['name','description','imageUrl','categorySlug']) if (input[k] !== undefined) fields[k] = cleanText(input[k], k==='description'?1200:200);
-  for (const k of ['price','stock']) if (input[k] !== undefined) {
-    const value = Number(input[k]);
-    ensure(Number.isSafeInteger(value) && value>=0 && value <= (k==='price'?100000000:1000000),400,`Invalid ${k}`);
-    fields[k]=value;
+  for (const k of ['name', 'description', 'imageUrl', 'imagePublicId']) {
+    if (input[k] !== undefined) fields[k] = cleanText(input[k], k === 'description' ? 1200 : 200);
   }
-  for (const k of ['featured','active']) if (input[k] !== undefined) fields[k]=input[k] ? 1 : 0;
-  if (fields.imageUrl !== undefined) {
-    ensure(!fields.imageUrl || fields.imageUrl.startsWith('/assets/products/') || /^https:\/\//.test(fields.imageUrl),400,'Image must be HTTPS or a local product asset');
+  for (const k of ['price', 'stock']) {
+    if (input[k] !== undefined) {
+      const v = Number(input[k]);
+      ensure(Number.isSafeInteger(v) && v >= 0 && v <= (k === 'price' ? 100_000_000 : 1_000_000), 400, `Invalid ${k}`);
+      fields[k] = v;
+    }
+  }
+  for (const k of ['featured', 'active']) {
+    if (input[k] !== undefined) {
+      ensure(typeof input[k] === 'boolean', 400, `${k} must be true or false`);
+      fields[k] = input[k];
+    }
+  }
+  const validateImage = (rawImage) => {
+    ensure(rawImage && typeof rawImage === 'object' && !Array.isArray(rawImage), 400, 'Each product photo must include an image URL.');
+    const imageUrl = cleanText(rawImage.url, 1000);
+    const imagePublicId = cleanText(rawImage.publicId || '', 200);
+    ensure(
+      imageUrl.startsWith('/assets/products/') || /^https:\/\//.test(imageUrl),
+      400, 'Image must be an HTTPS URL or a local product asset path'
+    );
+    if (imagePublicId) {
+      const imagePath = `/iwacumall/products/${imagePublicId.split('/').pop()}.`;
+      const expectedCloudPrefix = `https://res.cloudinary.com/${config.cloudinaryCloudName}/image/upload/`;
+      ensure(
+        cloudinaryUploadEnabled() && /^iwacumall\/products\/[0-9a-f-]{36}$/i.test(imagePublicId) &&
+        imageUrl.startsWith(expectedCloudPrefix) && imageUrl.includes(imagePath),
+        400, 'Uploaded image ID must match its Cloudinary product image URL'
+      );
+    }
+    return { url: imageUrl, publicId: imagePublicId };
+  };
+  if (input.images !== undefined) {
+    ensure(Array.isArray(input.images) && input.images.length <= 8, 400, 'A product can have up to 8 photos.');
+    fields.images = input.images.map(validateImage);
+    const publicIds = fields.images.map(image => image.publicId).filter(Boolean);
+    ensure(new Set(publicIds).size === publicIds.length, 400, 'A product gallery cannot contain the same uploaded photo twice.');
+    const primary = fields.images[0];
+    fields.imageUrl = primary?.url || '';
+    fields.imagePublicId = primary?.publicId || '';
+  } else if (fields.imageUrl !== undefined || fields.imagePublicId !== undefined) {
+    const imageUrl = fields.imageUrl ?? existing?.imageUrl ?? '';
+    const imagePublicId = fields.imagePublicId ?? existing?.imagePublicId ?? '';
+    const unchangedPrimary = partial && existing && imageUrl === existing.imageUrl && imagePublicId === (existing.imagePublicId || '');
+    if (!(unchangedPrimary && Array.isArray(existing.images) && existing.images.length)) {
+      fields.images = imageUrl ? [validateImage({ url: imageUrl, publicId: imagePublicId })] : [];
+    }
+    fields.imageUrl = imageUrl;
+    fields.imagePublicId = imagePublicId;
   }
   if (!partial) {
-    ensure(fields.name && fields.price!==undefined && fields.stock!==undefined,400,'Name, price and stock are required');
+    ensure(fields.name && fields.price !== undefined && fields.stock !== undefined, 400, 'Name, price and stock are required');
   }
-  if (fields.categorySlug !== undefined) {
-    const category=db.prepare('SELECT id FROM categories WHERE slug=?').get(slugify(fields.categorySlug));
-    ensure(category,400,'Unknown category');
-    fields.categoryId=category.id;
-    delete fields.categorySlug;
+  if (input.categorySlug !== undefined) {
+    const cat = await categories.findBySlug(slugify(cleanText(input.categorySlug, 80)));
+    ensure(cat && cat.active !== false, 400, 'Unknown or archived category');
+    fields.categoryId   = cat.id;
+    fields.categorySlug = cat.slug;
   }
   return fields;
 }
-const attempts = new Map();
-function rateLimit(req, endpoint) {
-  const key = `${req.socket.remoteAddress}:${endpoint}`;
-  const now=Date.now();
-  const entry=attempts.get(key) || {count:0, until:now+15*60*1000};
-  if (now>entry.until) {entry.count=0;entry.until=now+15*60*1000;}
-  entry.count+=1;attempts.set(key,entry);
-  ensure(entry.count<=15,429,'Too many attempts. Try again later');
-  if(attempts.size>2000) for (const [k,v] of attempts) if(v.until<now) attempts.delete(k);
+
+function productImages(product) {
+  if (Array.isArray(product?.images)) {
+    const gallery = product.images.filter(image => image && typeof image.url === 'string' && image.url)
+      .map(image => ({ url: image.url, publicId: typeof image.publicId === 'string' ? image.publicId : '' }));
+    if (gallery.length) return gallery;
+  }
+  return product?.imageUrl ? [{ url: product.imageUrl, publicId: product.imagePublicId || '' }] : [];
 }
 
-async function api(req,res,url) {
-  const path=url.pathname, method=req.method;
-  if (path==='/api/health' && method==='GET') return json(res,200,{ok:true,service:'iwacumall-api',database:'connected'});
-  if (path==='/api/config' && method==='GET') return json(res,200,{storeName:process.env.STORE_NAME||'IwacuMall',storeAddress:process.env.STORE_ADDRESS||'Downtown Kigali',storePhone:process.env.STORE_PHONE||'0788651421',currency:'RWF',paymentMethods:['CASH_ON_DELIVERY'],deliveryPolicy:'Delivery charges, if any, are confirmed by the store separately.'});
-  if (path==='/api/categories' && method==='GET') return json(res,200,{categories:db.prepare('SELECT id,name,slug FROM categories ORDER BY name').all()});
-  if (path==='/api/products' && method==='GET') {
-    const category=cleanText(url.searchParams.get('category')||'',60);
-    const search=cleanText(url.searchParams.get('search')||'',100);
-    const featured=url.searchParams.get('featured')==='1';
-    const limit=Math.min(100,Math.max(1,Number(url.searchParams.get('limit'))||80));
-    const parts=['p.active=1']; const args=[];
-    if(category) {parts.push('c.slug=?');args.push(category);}
-    if(search) {parts.push('(p.name LIKE ? OR p.description LIKE ?)');args.push(`%${search}%`,`%${search}%`);}
-    if(featured) parts.push('p.featured=1');
-    const rows=db.prepare(productQuery(limit,`WHERE ${parts.join(' AND ')} ORDER BY p.featured DESC,p.created_at DESC`)).all(...args);
-    return json(res,200,{products:rows});
-  }
-  if (/^\/api\/products\/[a-zA-Z0-9-]+$/.test(path) && method==='GET') {
-    const id=path.split('/').pop();
-    const row=db.prepare(productQuery(1,'WHERE p.id=? AND p.active=1')).get(id);
-    ensure(row,404,'Product not found');return json(res,200,{product:row});
-  }
-  if(path==='/api/auth/register'&&method==='POST') {
-    rateLimit(req,'register');const b=await bodyJson(req);
-    const name=cleanText(b.name,100),email=cleanText(b.email,254).toLowerCase(), password=b.password;
-    ensure(name.length>=2 && validEmail(email) && typeof password==='string' && password.length>=10 && password.length<=128,400,'Provide name, valid email, and password of 10–128 characters');
-    ensure(!db.prepare('SELECT id FROM users WHERE email=?').get(email),409,'Email already registered');
-    const id=randomUUID();
-    db.prepare('INSERT INTO users(id,name,email,password_hash,role) VALUES(?,?,?,?,?)').run(id,name,email,createPasswordHash(password),'CUSTOMER');
-    return json(res,201,session({id,name,email,role:'CUSTOMER'}));
-  }
-  if(path==='/api/auth/login'&&method==='POST') {
-    rateLimit(req,'login');const b=await bodyJson(req);
-    const email=cleanText(b.email,254).toLowerCase(),password=b.password;
-    ensure(validEmail(email) && typeof password==='string' && password.length<=128,400,'Invalid credentials');
-    const user=db.prepare('SELECT id,name,email,password_hash,role FROM users WHERE email=?').get(email);
-    ensure(user && verifyPassword(password,user.password_hash),401,'Invalid email or password');
-    return json(res,200,session(user));
-  }
-  if(path==='/api/auth/logout'&&method==='POST') {
-    authUser(req);const token=req.headers.authorization.slice(7);
-    db.prepare('DELETE FROM sessions WHERE token_hash=?').run(tokenHash(token));
-    return json(res,200,{ok:true});
-  }
-  if(path==='/api/me'&&method==='GET') return json(res,200,{user:authUser(req)});
-  if(path==='/api/me/orders'&&method==='GET') {
-    const user=authUser(req);
-    const orders=db.prepare('SELECT * FROM orders WHERE user_id=? ORDER BY created_at DESC').all(user.id);
-    for(const order of orders) order.items=db.prepare('SELECT product_id,product_name,unit_price,quantity FROM order_items WHERE order_id=?').all(order.id);
-    return json(res,200,{orders});
-  }
-  if(path==='/api/orders'&&method==='POST') {
-    const user=authUser(req),b=await bodyJson(req);
-    const customerName=cleanText(b.customerName||user.name,100),phone=cleanText(b.phone,30),address=cleanText(b.address,180),city=cleanText(b.city,90),note=cleanText(b.note||'',500);
-    ensure(customerName.length>=2 && phone.length>=8 && phone.length<=20 && address.length>=5 && city.length>=2,400,'Complete your name, phone number, city and delivery address');
-    ensure(Array.isArray(b.items) && b.items.length>=1 && b.items.length<=50,400,'Your cart is empty or too large');
-    const merged=new Map();
-    for(const item of b.items) {
-      const id=cleanText(item.productId,60),quantity=Number(item.quantity);
-      ensure(id && Number.isSafeInteger(quantity) && quantity>=1 && quantity<=100,400,'Invalid cart item');
-      merged.set(id,(merged.get(id)||0)+quantity);
-      ensure(merged.get(id)<=100,400,'Maximum quantity is 100 per item');
-    }
-    db.exec('BEGIN IMMEDIATE');
-    try {
-      const items=[];
-      for(const [id,quantity] of merged) {
-        const p=db.prepare('SELECT id,name,price,stock FROM products WHERE id=? AND active=1').get(id);
-        ensure(p,400,'A product in your cart is unavailable');
-        ensure(p.stock>=quantity,409,`Not enough stock for ${p.name}`);
-        items.push({p,quantity});
-      }
-      const subtotal=items.reduce((total,{p,quantity})=>total+p.price*quantity,0);
-      ensure(Number.isSafeInteger(subtotal) && subtotal<=1000000000,400,'Order value is too large');
-      const id=randomUUID();
-      db.prepare(`INSERT INTO orders(id,user_id,customer_name,phone,address,city,note,subtotal,delivery_fee,total)
-        VALUES(?,?,?,?,?,?,?,?,?,?)`).run(id,user.id,customerName,phone,address,city,note,subtotal,0,subtotal);
-      for(const {p,quantity} of items) {
-        const updated=db.prepare('UPDATE products SET stock=stock-?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND stock>=?').run(quantity,p.id,quantity);
-        ensure(updated.changes===1,409,'Stock changed. Please retry');
-        db.prepare('INSERT INTO order_items(id,order_id,product_id,product_name,unit_price,quantity) VALUES(?,?,?,?,?,?)')
-          .run(randomUUID(),id,p.id,p.name,p.price,quantity);
-      }
-      db.exec('COMMIT');return json(res,201,{order:{id,total:subtotal,status:'PLACED',items:items.length}});
-    } catch(e) {db.exec('ROLLBACK');throw e;}
-  }
-  if(/^\/api\/orders\/[a-zA-Z0-9-]+$/.test(path) && method==='GET') {
-    const user=authUser(req),id=path.split('/').pop();
-    const order=db.prepare('SELECT * FROM orders WHERE id=?').get(id);
-    ensure(order && (order.user_id===user.id || user.role==='ADMIN'),404,'Order not found');
-    order.items=db.prepare('SELECT product_id,product_name,unit_price,quantity FROM order_items WHERE order_id=?').all(id);
-    return json(res,200,{order});
-  }
-  if(path==='/api/admin/stats' && method==='GET') {
-    authUser(req,true);
-    return json(res,200,{stats:{products:db.prepare('SELECT COUNT(*) n FROM products WHERE active=1').get().n,
-      customers:db.prepare("SELECT COUNT(*) n FROM users WHERE role='CUSTOMER'").get().n,
-      orders:db.prepare('SELECT COUNT(*) n FROM orders').get().n,
-      revenue:db.prepare("SELECT COALESCE(SUM(total),0) n FROM orders WHERE status='DELIVERED'").get().n,
-      openOrders:db.prepare("SELECT COUNT(*) n FROM orders WHERE status NOT IN ('DELIVERED','CANCELLED')").get().n}});
-  }
-  if(path==='/api/admin/orders' && method==='GET') {
-    authUser(req,true);
-    const orders=db.prepare('SELECT * FROM orders ORDER BY created_at DESC LIMIT 100').all();
-    for(const order of orders) order.items=db.prepare('SELECT product_name,quantity,unit_price FROM order_items WHERE order_id=?').all(order.id);
-    return json(res,200,{orders});
-  }
-  if(/^\/api\/admin\/orders\/[a-zA-Z0-9-]+\/status$/.test(path) && method==='PATCH') {
-    authUser(req,true); const id=path.split('/')[4],b=await bodyJson(req);
-    const transitions={PLACED:['CONFIRMED','CANCELLED'],CONFIRMED:['PACKING','CANCELLED'],PACKING:['OUT_FOR_DELIVERY','CANCELLED'],OUT_FOR_DELIVERY:['DELIVERED','CANCELLED'],DELIVERED:[],CANCELLED:[]};
-    const old=db.prepare('SELECT status FROM orders WHERE id=?').get(id);
-    ensure(old,404,'Order not found');ensure(transitions[old.status]?.includes(b.status),400,'Invalid order status transition');
-    db.exec('BEGIN IMMEDIATE');
-    try {
-      db.prepare('UPDATE orders SET status=? WHERE id=?').run(b.status,id);
-      if(b.status==='CANCELLED') {
-        const lines=db.prepare('SELECT product_id,quantity FROM order_items WHERE order_id=?').all(id);
-        for(const line of lines) db.prepare('UPDATE products SET stock=stock+? WHERE id=?').run(line.quantity,line.product_id);
-      }
-      db.exec('COMMIT');return json(res,200,{ok:true,status:b.status});
-    }catch(e){db.exec('ROLLBACK');throw e;}
-  }
-  if(path==='/api/admin/products' && method==='GET') {
-    authUser(req,true);return json(res,200,{products:db.prepare(productQuery(200,'ORDER BY p.created_at DESC')).all()});
-  }
-  if(path==='/api/admin/products' && method==='POST') {
-    authUser(req,true);const b=sanitizeProduct(await bodyJson(req));
-    const id=randomUUID(), slug=`${slugify(b.name)}-${id.slice(0,6)}`;
-    db.prepare(`INSERT INTO products(id,name,slug,description,price,stock,category_id,image_url,featured,active)
-      VALUES(?,?,?,?,?,?,?,?,?,1)`).run(id,b.name,slug,b.description||'',b.price,b.stock,b.categoryId||null,b.imageUrl||'',b.featured||0);
-    return json(res,201,{id,slug});
-  }
-  if(/^\/api\/admin\/products\/[a-zA-Z0-9-]+$/.test(path)) {
-    authUser(req,true);const id=path.split('/').pop();
-    ensure(db.prepare('SELECT id FROM products WHERE id=?').get(id),404,'Product not found');
-    if(method==='DELETE') {db.prepare('UPDATE products SET active=0,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(id);return json(res,200,{ok:true});}
-    if(method==='PATCH') {
-      const b=sanitizeProduct(await bodyJson(req),true);
-      const map={name:'name',description:'description',imageUrl:'image_url',categoryId:'category_id',price:'price',stock:'stock',featured:'featured',active:'active'};
-      const entries=Object.entries(b).filter(([k])=>map[k]);ensure(entries.length>0,400,'No valid changes');
-      const assigns=entries.map(([k])=>`${map[k]}=?`).join(',');
-      db.prepare(`UPDATE products SET ${assigns},updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(...entries.map(([,v])=>v),id);
-      return json(res,200,{ok:true});
+function customerReturnSummary(order, returnWindowDays) {
+  const requests = Array.isArray(order.returnRequests) ? order.returnRequests : [];
+  const activeRequest = requests.some(request => ['REQUESTED', 'APPROVED'].includes(request.status));
+  const consumed = new Map();
+  for (const request of requests) {
+    if (request.status === 'REJECTED') continue;
+    for (const item of request.items || []) {
+      const quantity = request.status === 'RECEIVED' ? Number(item.returnedQuantity || 0) : Number(item.quantity || 0);
+      consumed.set(item.productId, (consumed.get(item.productId) || 0) + quantity);
     }
   }
-  if(path==='/api/admin/categories' && method==='POST') {
-    authUser(req,true);const b=await bodyJson(req);const name=cleanText(b.name,80),slug=slugify(name);
-    ensure(name.length>=2 && slug,400,'Enter a valid category name');
-    ensure(!db.prepare('SELECT id FROM categories WHERE slug=?').get(slug),409,'Category already exists');
-    const id=randomUUID();db.prepare('INSERT INTO categories(id,name,slug) VALUES(?,?,?)').run(id,name,slug);
-    return json(res,201,{id,name,slug});
+  const remainingItems = (order.items || []).map(item => {
+    const orderedQuantity = Number(item.quantity || 0);
+    return {
+      productId: item.productId,
+      productName: item.productName || item.product_name || 'Product',
+      orderedQuantity,
+      availableQuantity: Math.max(0, orderedQuantity - (consumed.get(item.productId) || 0)),
+    };
+  }).filter(item => item.availableQuantity > 0);
+  const deliveredAt = order.deliveredAt || order.updatedAt || order.createdAt || null;
+  const deliveredTime = deliveredAt ? new Date(deliveredAt).getTime() : Number.NaN;
+  const configuredWindow = Number.isSafeInteger(order.returnWindowDays)
+    ? order.returnWindowDays
+    : Number(returnWindowDays);
+  const windowDays = Number.isSafeInteger(configuredWindow) ? configuredWindow : 0;
+  const deadline = windowDays > 0 && Number.isFinite(deliveredTime)
+    ? new Date(deliveredTime + windowDays * 24 * 60 * 60 * 1000)
+    : null;
+  const safeRequests = requests.map(request => ({
+    id: request.id,
+    status: request.status,
+    reason: request.reason,
+    requestedAt: request.requestedAt,
+    reviewedAt: request.reviewedAt,
+    reviewNote: request.reviewNote || '',
+    receivedAt: request.receivedAt,
+    items: (request.items || []).map(item => ({
+      productId: item.productId,
+      productName: item.productName,
+      quantity: Number(item.quantity || 0),
+      returnedQuantity: Number(item.returnedQuantity || 0),
+      restockedQuantity: Number(item.restockedQuantity || 0),
+    })),
+  }));
+  return {
+    returnRequests: safeRequests,
+    returnPolicy: {
+      windowDays,
+      deadline,
+      remainingItems,
+      canRequest: windowDays > 0 && order.fulfillmentStatus === 'DELIVERED' && order.paymentStatus === 'PAID' &&
+        !!deadline && Date.now() <= deadline.getTime() && !activeRequest && remainingItems.length > 0,
+    },
+  };
+}
+
+// ─── Invoice / payment helpers ────────────────────────────────────────────────
+
+function computeDeadline(settings) {
+  if (!settings.invoiceExpiryHours || settings.invoiceExpiryHours <= 0) return null;
+  return new Date(Date.now() + settings.invoiceExpiryHours * 3600 * 1000);
+}
+
+function computeDeliveryFee(settings) {
+  return settings.deliveryFeeFlat >= 0 ? settings.deliveryFeeFlat : null; // null = not configured
+}
+
+function computeTax(subtotal, settings) {
+  if (settings.taxRatePercent < 0) return null; // not configured
+  return Math.round(subtotal * settings.taxRatePercent / 100);
+}
+
+// ─── API route handler ────────────────────────────────────────────────────────
+
+async function api(req, res, url) {
+  const path   = url.pathname;
+  const method = req.method;
+  const ip     = getClientIp(req);
+
+  // Admin data routes stay closed until the administrator completes MFA setup.
+  if (!config.isTest && path.startsWith('/api/admin/') && !path.startsWith('/api/admin/mfa/')) {
+    const admin = await authUser(req, true);
+    ensure(admin.mfaEnabled, 403, 'Set up administrator two-factor authentication before using the dashboard.');
   }
-  fail(404,'API endpoint not found');
+
+  // ── Health / readiness ─────────────────────────────────────────────────────
+  if (path === '/api/health' && method === 'GET') {
+    const dbOk = await dbPing();
+    return json(res, dbOk ? 200 : 503, {
+      ok:       dbOk,
+      service:  'iwacumall-api',
+      database: dbOk ? 'connected' : 'unavailable',
+      env:      config.nodeEnv,
+    });
+  }
+
+  // ── Store config (public, non-secret) ──────────────────────────────────────
+  if (path === '/api/config' && method === 'GET') {
+    const methods = await paymentMethods.list(true).catch(() => []);
+    const settings = await storeSettings.get();
+    const expiryConfigured = settings.invoiceExpiryHours > 0;
+    const deliveryConfigured = settings.deliveryFeeFlat >= 0;
+    return json(res, 200, {
+      ...settings,
+      currency:       config.currency,
+      googleWebClientId: config.googleWebClientId || null,
+      paymentMethods: methods.map(m => ({ id: m.id, label: m.label, type: m.type })),
+      checkoutEnabled: methods.length > 0 && expiryConfigured && deliveryConfigured,
+      checkoutBlockedReason: methods.length === 0
+        ? 'No payment methods configured. Admin must add at least one payment method.'
+        : !expiryConfigured
+          ? 'Admin must set a payment deadline in Store settings.'
+          : !deliveryConfigured
+            ? 'Admin must set a delivery fee in Store settings.'
+            : null,
+    });
+  }
+
+  // ── Categories ─────────────────────────────────────────────────────────────
+  if (path === '/api/categories' && method === 'GET') {
+    return json(res, 200, { categories: await categories.list() });
+  }
+
+  // ── Products ───────────────────────────────────────────────────────────────
+  if (path === '/api/products' && method === 'GET') {
+    const categorySlug = cleanText(url.searchParams.get('category') || '', 60);
+    const search   = cleanText(url.searchParams.get('search') || '', 100);
+    const featured = url.searchParams.get('featured') === '1';
+    const limit    = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 80));
+    const page     = Math.max(1, Number(url.searchParams.get('page')) || 1);
+    const result   = await products.list({ categorySlug: categorySlug || undefined, search: search || undefined, featured, limit, page });
+    return json(res, 200, result);
+  }
+
+  if (/^\/api\/products\/[a-zA-Z0-9-]+$/.test(path) && method === 'GET') {
+    const id  = path.split('/').pop();
+    const row = await products.findById(id) || await products.findBySlug(id);
+    ensure(row && row.active, 404, 'Product not found');
+    return json(res, 200, { product: row });
+  }
+
+  // ── Auth: register ─────────────────────────────────────────────────────────
+  if (path === '/api/auth/register' && method === 'POST') {
+    await rateLimit(ip, 'register', config.rateLimitMaxRegister, config.rateLimitWindowMs);
+    const b        = await bodyJson(req);
+    const name     = cleanText(b.name, 100);
+    const email    = cleanText(b.email, 254).toLowerCase();
+    const password = b.password;
+    ensure(
+      name.length >= 2 && validEmail(email) &&
+      typeof password === 'string' && password.length >= 10 && password.length <= 128,
+      400, 'Provide name, valid email, and password of 10–128 characters'
+    );
+    const existing = await users.findByEmail(email);
+    ensure(!existing, 409, 'Email already registered');
+    const id   = randomUUID();
+    const userFields = {
+      id, name, email, passwordHash: createPasswordHash(password),
+      emailVerified: !config.emailVerificationRequired,
+    };
+    let user;
+
+    try {
+      if (config.emailVerificationRequired) {
+        await withDbTransaction(async session => {
+          user = await users.create(userFields, session);
+          const tokenExpiresAt = new Date(Date.now() + 24 * 3600 * 1000);
+          const evToken = await issueEmailVerificationToken(id, tokenExpiresAt, session);
+          await emailOutbox.queueAuthEmail({
+            userId: id, email, eventType: 'AUTH_EMAIL_VERIFICATION',
+            encryptedAuthToken: encryptSensitiveValue(evToken), tokenExpiresAt, session,
+          });
+        });
+      } else {
+        user = await users.create(userFields);
+      }
+    } catch (error) {
+      if (error?.code === 11000) fail(409, 'Email already registered');
+      throw error;
+    }
+
+    const { token, expiresAt } = await createSession(id);
+    setSessionCookie(res, token, config.sessionTtlSeconds);
+    return json(res, 201, {
+      token,
+      user:  { id, name, email: user.email, role: 'CUSTOMER', emailVerified: user.emailVerified },
+      emailVerificationRequired: config.emailVerificationRequired,
+    });
+  }
+
+  // ── Auth: login ────────────────────────────────────────────────────────────
+  if (path === '/api/auth/login' && method === 'POST') {
+    await rateLimit(ip, 'login', config.rateLimitMaxLogin, config.rateLimitWindowMs);
+    const b        = await bodyJson(req);
+    const email    = cleanText(b.email, 254).toLowerCase();
+    const password = b.password;
+    ensure(validEmail(email) && typeof password === 'string' && password.length <= 128, 400, 'Invalid credentials');
+    const user = await users.findByEmail(email);
+    ensure(user && verifyPassword(password, user.passwordHash), 401, 'Invalid email or password');
+    if (user.role === 'ADMIN' && user.mfaEnabled) {
+      if (!b.totpCode) return json(res, 200, { mfaRequired: true });
+      const record = await adminMfa.find(user.id);
+      let secret = '';
+      try { secret = decryptTotpSecret(record?.secret); } catch {}
+      const validTotp = secret && verifyTotp(secret, b.totpCode);
+      const validRecoveryCode = !validTotp && await adminMfa.consumeRecoveryCode(user.id, hashRecoveryCode(b.totpCode));
+      ensure(validTotp || validRecoveryCode, 401, 'Authenticator or recovery code is invalid');
+    }
+    const { token } = await createSession(user.id);
+    setSessionCookie(res, token, config.sessionTtlSeconds);
+    return json(res, 200, {
+      ...(req.headers['x-iwacumall-client'] === 'mobile' ? { token } : {}),
+      user: { id: user.id, name: user.name, email: user.email, role: user.role, emailVerified: user.emailVerified, googleLinked: !!user.googleSub, mfaEnabled: !!user.mfaEnabled },
+    });
+  }
+
+  // ── Auth: Google ID token (web and native clients) ─────────────────────────
+  if (path === '/api/auth/google' && method === 'POST') {
+    await rateLimit(ip, 'google-login', config.rateLimitMaxLogin, config.rateLimitWindowMs);
+    if (/(?:^|;\s*)iwm_session=/.test(req.headers.cookie || '')) verifyCsrf(req);
+    ensure(config.googleClientIds.length > 0, 503, 'Google sign-in is not configured yet.');
+    const b = await bodyJson(req);
+    ensure(typeof b.idToken === 'string' && b.idToken.length > 20 && b.idToken.length <= 8192, 400, 'Google credential is required.');
+
+    let profile;
+    try {
+      profile = await verifyGoogleIdToken(b.idToken, config.googleClientIds);
+    } catch {
+      fail(401, 'Google sign-in could not be verified. Please try again.');
+    }
+
+    let user = await users.findByGoogleSub(profile.googleSub);
+    if (!user) {
+      const existing = await users.findByEmail(profile.email);
+      if (existing) {
+        ensure(existing.role === 'CUSTOMER', 403, 'Administrator accounts must use administrator sign-in.');
+        ensure(existing.emailVerified === true, 409, 'Sign in and verify this email before linking Google to the existing account.');
+        ensure(!existing.googleSub || existing.googleSub === profile.googleSub, 409, 'This email is linked to a different Google account.');
+        user = await users.linkGoogleIdentity(existing.id, profile.googleSub);
+        ensure(user, 409, 'This account was updated during sign-in. Please try again.');
+      } else {
+        try {
+          user = await users.create({
+            id: randomUUID(), name: cleanText(profile.name, 100) || profile.email.split('@')[0],
+            email: profile.email, emailVerified: true, googleSub: profile.googleSub,
+          });
+        } catch (error) {
+          if (error?.code !== 11000) throw error;
+          user = await users.findByGoogleSub(profile.googleSub);
+          if (!user) {
+            const racedEmail = await users.findByEmail(profile.email);
+            if (racedEmail && racedEmail.role === 'CUSTOMER' && racedEmail.emailVerified === true && !racedEmail.googleSub) {
+              user = await users.linkGoogleIdentity(racedEmail.id, profile.googleSub);
+            }
+          }
+          ensure(user, 409, 'This account was created during sign-in. Please try again.');
+        }
+      }
+    }
+    ensure(user.role === 'CUSTOMER', 403, 'Administrator accounts must use administrator sign-in.');
+
+    const { token } = await createSession(user.id);
+    setSessionCookie(res, token, config.sessionTtlSeconds);
+    return json(res, 200, {
+      ...(req.headers['x-iwacumall-client'] === 'mobile' ? { token } : {}),
+      user: { id: user.id, name: user.name, email: user.email, role: user.role, emailVerified: !!user.emailVerified, googleLinked: !!user.googleSub, mfaEnabled: !!user.mfaEnabled },
+    });
+  }
+
+  // ── Auth: logout ───────────────────────────────────────────────────────────
+  if (path === '/api/auth/logout' && method === 'POST') {
+    verifyCsrf(req);
+    const token = getSessionToken(req);
+    if (token) await sessions.deleteByToken(tokenHash(token)).catch(() => {});
+    clearSessionCookie(res);
+    return json(res, 200, { ok: true });
+  }
+
+  // ── Auth: verify email ─────────────────────────────────────────────────────
+  if (path === '/api/auth/verify-email' && method === 'GET') {
+    const rawToken = url.searchParams.get('token') || '';
+    ensure(rawToken.length > 10, 400, 'Invalid verification link');
+    const user = await users.verifyEmail(tokenHash(rawToken));
+    ensure(user, 400, 'Verification link is invalid or has expired');
+    // Redirect to home with success notice
+    res.writeHead(302, { Location: '/?verified=1' });
+    return res.end();
+  }
+
+  if (path === '/api/auth/resend-verification' && method === 'POST') {
+    await rateLimit(ip, 'verify-resend', config.rateLimitMaxReset, config.rateLimitWindowMs);
+    const user = await authUser(req);
+    verifyCsrf(req);
+    if (!user.emailVerified) {
+      await withDbTransaction(async session => {
+        const tokenExpiresAt = new Date(Date.now() + 24 * 3600 * 1000);
+        const rawToken = await issueEmailVerificationToken(user.id, tokenExpiresAt, session);
+        await emailOutbox.queueAuthEmail({
+          userId: user.id, email: user.email, eventType: 'AUTH_EMAIL_VERIFICATION',
+          encryptedAuthToken: encryptSensitiveValue(rawToken), tokenExpiresAt, session,
+        });
+      });
+    }
+    return json(res, 200, { ok: true, message: 'If verification is needed, a fresh link has been sent.' });
+  }
+
+  // ── Auth: request password reset ───────────────────────────────────────────
+  if (path === '/api/auth/forgot-password' && method === 'POST') {
+    await rateLimit(ip, 'forgot', config.rateLimitMaxReset, config.rateLimitWindowMs);
+    const { email: rawEmail } = await bodyJson(req);
+    const email = cleanText(rawEmail || '', 254).toLowerCase();
+    // Always return 200 — do not reveal whether email is registered
+    if (validEmail(email)) {
+      const user = await users.findByEmail(email);
+      if (user) {
+        try {
+          await withDbTransaction(async session => {
+            const tokenExpiresAt = new Date(Date.now() + 3600 * 1000);
+            const resetToken = await issuePasswordResetToken(user.id, tokenExpiresAt, session);
+            await emailOutbox.queueAuthEmail({
+              userId: user.id, email, eventType: 'AUTH_PASSWORD_RESET',
+              encryptedAuthToken: encryptSensitiveValue(resetToken), tokenExpiresAt, session,
+            });
+          });
+        } catch (error) {
+          console.warn('[auth] Password reset email could not be queued:', error?.code || 'QUEUE_ERROR');
+        }
+      }
+    }
+    return json(res, 200, { ok: true, message: 'If that email is registered you will receive a reset link.' });
+  }
+
+  // ── Auth: reset password ───────────────────────────────────────────────────
+  if (path === '/api/auth/reset-password' && method === 'POST') {
+    await rateLimit(ip, 'reset', config.rateLimitMaxReset, config.rateLimitWindowMs);
+    const { token: rawToken, password } = await bodyJson(req);
+    ensure(typeof rawToken === 'string' && rawToken.length > 10, 400, 'Invalid token');
+    ensure(typeof password === 'string' && password.length >= 10 && password.length <= 128, 400, 'Password must be 10–128 characters');
+    const user = await users.resetPasswordWithToken(tokenHash(rawToken), createPasswordHash(password));
+    ensure(user, 400, 'Reset link is invalid or has expired');
+    return json(res, 200, { ok: true });
+  }
+
+  // ── Auth: change password (authenticated) ─────────────────────────────────
+  if (path === '/api/auth/change-password' && method === 'POST') {
+    const user = await authUser(req);
+    verifyCsrf(req);
+    const { currentPassword, newPassword } = await bodyJson(req);
+    ensure(typeof currentPassword === 'string' && typeof newPassword === 'string', 400, 'Missing fields');
+    ensure(newPassword.length >= 10 && newPassword.length <= 128, 400, 'New password must be 10–128 characters');
+    const full = await users.findByEmail(user.email);
+    ensure(verifyPassword(currentPassword, full.passwordHash), 401, 'Current password is incorrect');
+    await users.setPassword(user.id, createPasswordHash(newPassword));
+    await sessions.deleteAllForUser(user.id);
+    clearSessionCookie(res);
+    return json(res, 200, { ok: true });
+  }
+
+  // ── Auth: delete account ───────────────────────────────────────────────────
+  if (path === '/api/auth/delete-account' && method === 'POST') {
+    const user = await authUser(req);
+    verifyCsrf(req);
+    ensure(user.role !== 'ADMIN', 403, 'Admin accounts cannot be self-deleted');
+    const { password, idToken } = await bodyJson(req);
+    if (user.googleSub) {
+      ensure(typeof idToken === 'string' && idToken.length > 20, 400, 'A fresh Google sign-in is required to delete this account.');
+      ensure(config.googleClientIds.length > 0, 503, 'Google sign-in is not configured.');
+      let profile;
+      try { profile = await verifyGoogleIdToken(idToken, config.googleClientIds); }
+      catch { fail(401, 'Google account verification failed.'); }
+      ensure(profile.googleSub === user.googleSub, 401, 'Sign in with the Google account linked to this profile.');
+    } else {
+      const full = await users.findByEmail(user.email);
+      ensure(verifyPassword(password, full?.passwordHash), 401, 'Password is incorrect');
+    }
+    await sessions.deleteAllForUser(user.id);
+    await users.anonymize(user.id);
+    clearSessionCookie(res);
+    return json(res, 200, { ok: true });
+  }
+
+  // ── Me ─────────────────────────────────────────────────────────────────────
+  if (path === '/api/me' && method === 'GET') {
+    const user = await authUser(req);
+    return json(res, 200, {
+      user: { id: user.id, name: user.name, email: user.email, role: user.role, emailVerified: user.emailVerified, googleLinked: !!user.googleSub, mfaEnabled: !!user.mfaEnabled }
+    });
+  }
+
+  if (path === '/api/me' && method === 'PATCH') {
+    const user = await authUser(req);
+    verifyCsrf(req);
+    const { name: rawName } = await bodyJson(req);
+    const name = cleanText(rawName, 100);
+    ensure(name.length >= 2, 400, 'Enter a name with at least two characters.');
+    await users.updateName(user.id, name);
+    return json(res, 200, { user: { id: user.id, name, email: user.email, role: user.role, emailVerified: user.emailVerified, mfaEnabled: !!user.mfaEnabled } });
+  }
+
+  if (path === '/api/me/addresses' && method === 'GET') {
+    const user = await authUser(req);
+    return json(res, 200, { addresses: user.savedAddresses || [] });
+  }
+
+  if (path === '/api/me/addresses' && method === 'POST') {
+    const user = await authUser(req);
+    verifyCsrf(req);
+    const body = await bodyJson(req);
+    const address = {
+      id: randomUUID(),
+      label: cleanText(body.label, 40),
+      recipientName: cleanText(body.recipientName || user.name, 100),
+      phone: cleanText(body.phone, 30),
+      city: cleanText(body.city, 90),
+      address: cleanText(body.address, 180),
+      isDefault: body.isDefault === true,
+      createdAt: new Date(),
+    };
+    ensure(body.isDefault === undefined || typeof body.isDefault === 'boolean', 400, 'isDefault must be true or false.');
+    ensure(address.label.length >= 2 && address.recipientName.length >= 2 && address.phone.replace(/\D/g, '').length >= 8 && address.address.length >= 5 && address.city.length >= 2, 400, 'Complete the label, recipient, phone, city and delivery address.');
+    const addresses = await users.saveAddress(user.id, address);
+    await auditLog.record({ action: 'DELIVERY_ADDRESS_ADDED', userId: user.id, detail: address.label });
+    return json(res, 201, { addresses });
+  }
+
+  const savedAddressPath = path.match(/^\/api\/me\/addresses\/([a-zA-Z0-9-]+)$/);
+  if (savedAddressPath) {
+    const user = await authUser(req);
+    const addressId = savedAddressPath[1];
+    if (method === 'PATCH') {
+      verifyCsrf(req);
+      const body = await bodyJson(req);
+      const existing = (user.savedAddresses || []).find(address => address.id === addressId);
+      ensure(existing, 404, 'Saved delivery address not found.');
+      ensure(body.isDefault === undefined || typeof body.isDefault === 'boolean', 400, 'isDefault must be true or false.');
+      const address = {
+        ...existing,
+        label: body.label === undefined ? existing.label : cleanText(body.label, 40),
+        recipientName: body.recipientName === undefined ? existing.recipientName : cleanText(body.recipientName, 100),
+        phone: body.phone === undefined ? existing.phone : cleanText(body.phone, 30),
+        city: body.city === undefined ? existing.city : cleanText(body.city, 90),
+        address: body.address === undefined ? existing.address : cleanText(body.address, 180),
+        isDefault: body.isDefault === undefined ? existing.isDefault === true : body.isDefault,
+      };
+      ensure(address.label.length >= 2 && address.recipientName.length >= 2 && address.phone.replace(/\D/g, '').length >= 8 && address.address.length >= 5 && address.city.length >= 2, 400, 'Complete the label, recipient, phone, city and delivery address.');
+      const addresses = await users.saveAddress(user.id, address);
+      return json(res, 200, { addresses });
+    }
+    if (method === 'DELETE') {
+      verifyCsrf(req);
+      const result = await users.deleteAddress(user.id, addressId);
+      ensure(result.removed, 404, 'Saved delivery address not found.');
+      return json(res, 200, { addresses: result.addresses });
+    }
+  }
+
+  if (path === '/api/me/sessions' && method === 'GET') {
+    const user = await authUser(req);
+    const currentToken = getSessionToken(req);
+    const currentHash = currentToken ? tokenHash(currentToken) : '';
+    const entries = await sessions.listForUser(user.id);
+    return json(res, 200, { sessions: entries.map(entry => ({ id: entry._id.toHexString(), createdAt: entry.createdAt, expiresAt: entry.expiresAt, isCurrent: entry.tokenHash === currentHash })) });
+  }
+
+  if (/^\/api\/me\/sessions\/[a-f0-9]{24}$/.test(path) && method === 'DELETE') {
+    const user = await authUser(req);
+    verifyCsrf(req);
+    const oid = path.split('/').pop();
+    const revoked = await sessions.revokeByOid(oid, user.id);
+    ensure(revoked.deletedCount === 1, 404, 'Session not found.');
+    return json(res, 200, { ok: true });
+  }
+
+  if (path === '/api/me/orders' && method === 'GET') {
+    const user = await authUser(req);
+    const requestedLimit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : Number.NaN;
+    const requestedSkip = url.searchParams.has('skip') ? Number(url.searchParams.get('skip')) : Number.NaN;
+    const limit = Number.isSafeInteger(requestedLimit) ? Math.min(100, Math.max(1, requestedLimit)) : 20;
+    const skip = Number.isSafeInteger(requestedSkip) ? Math.min(1_000_000, Math.max(0, requestedSkip)) : 0;
+    const rows = await orders.findByUserId(user.id, limit + 1, skip);
+    const hasMore = rows.length > limit;
+    const myOrders = rows.slice(0, limit);
+    const settings = await storeSettings.get();
+    return json(res, 200, { orders: myOrders.map(order => ({
+      ...order,
+      ...customerReturnSummary(order, settings.returnWindowDays),
+      refunds: (order.refunds || []).map(({ amount, reason, createdAt }) => ({ amount, reason, createdAt })),
+    })), hasMore, nextSkip: skip + myOrders.length });
+  }
+
+  const customerReturnPath = path.match(/^\/api\/orders\/([a-zA-Z0-9-]+)\/returns$/);
+  if (customerReturnPath && method === 'POST') {
+    const user = await authUser(req);
+    verifyCsrf(req);
+    await rateLimit(ip, `return-request:${user.id}`, 5, config.rateLimitWindowMs);
+    const settings = await storeSettings.get();
+    const body = await bodyJson(req);
+    const reason = cleanText(body.reason, 500);
+    ensure(reason.length >= 5, 400, 'Enter at least five characters explaining your return request.');
+    ensure(Array.isArray(body.items) && body.items.length >= 1 && body.items.length <= 50, 400, 'Select at least one item to return.');
+    const items = body.items.map(item => ({
+      productId: cleanText(item?.productId, 60),
+      quantity: Number(item?.quantity),
+    }));
+    ensure(items.every(item => item.productId && Number.isSafeInteger(item.quantity) && item.quantity >= 1 && item.quantity <= 100), 400, 'Return quantities must be whole numbers from 1 to 100.');
+    const result = await orders.requestReturn({
+      orderId: customerReturnPath[1], userId: user.id, items, reason,
+      returnWindowDays: Number(settings.returnWindowDays),
+    });
+    return json(res, 201, result);
+  }
+
+  // ── Place order ────────────────────────────────────────────────────────────
+  if (path === '/api/orders' && method === 'POST') {
+    const user = await authUser(req);
+    verifyCsrf(req);
+
+    if (config.emailVerificationRequired) {
+      ensure(user.emailVerified, 403, 'Please verify your email address before placing an order.');
+    }
+
+    // Validate delivery config
+    const settings = await storeSettings.get();
+    const deliveryFee = computeDeliveryFee(settings);
+    ensure(deliveryFee !== null, 503, 'Delivery fee is not configured. Please contact the store.');
+
+    const expiryConfigured = settings.invoiceExpiryHours > 0;
+    ensure(expiryConfigured, 503, 'Payment deadline not configured. Please contact the store.');
+
+    const b = await bodyJson(req);
+    const customerName = cleanText(b.customerName || user.name, 100);
+    const phone   = cleanText(b.phone,   30);
+    const address = cleanText(b.address, 180);
+    const city    = cleanText(b.city,    90);
+    const note    = cleanText(b.note || '', 500);
+
+    ensure(customerName.length >= 2 && phone.length >= 8 && phone.length <= 20 && address.length >= 5 && city.length >= 2,
+      400, 'Complete your name, phone number, city and delivery address');
+
+    // Payment method
+    const selectedMethodId = cleanText(b.paymentMethodId || '', 60);
+    ensure(selectedMethodId, 400, 'Select a payment method');
+    const method = await paymentMethods.findById(selectedMethodId);
+    ensure(method && method.enabled, 400, 'Selected payment method is not available');
+
+    // Cart items
+    ensure(Array.isArray(b.items) && b.items.length >= 1 && b.items.length <= 50, 400, 'Your cart is empty or too large');
+    const merged = new Map();
+    for (const item of b.items) {
+      const id  = cleanText(item.productId, 60);
+      const qty = Number(item.quantity);
+      ensure(id && Number.isSafeInteger(qty) && qty >= 1 && qty <= 100, 400, 'Invalid cart item');
+      merged.set(id, (merged.get(id) || 0) + qty);
+      ensure(merged.get(id) <= 100, 400, 'Maximum 100 per item');
+    }
+
+    // Every order must carry a client-generated key so network retries cannot
+    // reserve stock or create a second invoice.
+    const idempotencyKey = cleanText(req.headers['idempotency-key'] || '', 128);
+    ensure(/^[A-Za-z0-9._:-]{12,128}$/.test(idempotencyKey), 400, 'A valid Idempotency-Key header is required');
+    const requestFingerprint = createHash('sha256')
+      .update(JSON.stringify({
+        customerName, phone, address, city, note,
+        selectedMethodId,
+        items: Array.from(merged.entries()).sort((a,b) => a[0].localeCompare(b[0]))
+      }))
+      .digest('hex');
+
+    // Fetch current prices from DB (never trust client-submitted prices)
+    const lineItems = [];
+    for (const [productId, quantity] of merged) {
+      const p = await products.findById(productId);
+      ensure(p && p.active, 400, 'A product in your cart is unavailable');
+      lineItems.push({ productId, productName: p.name, unitPrice: p.price, quantity });
+    }
+
+    const subtotal = lineItems.reduce((s, i) => s + i.unitPrice * i.quantity, 0);
+    ensure(Number.isSafeInteger(subtotal) && subtotal <= 1_000_000_000, 400, 'Order value is too large');
+
+    const taxAmount = computeTax(subtotal, settings) || 0;
+    const deadline  = computeDeadline(settings);
+
+    // Snapshot the payment instructions so later edits don't change this invoice
+    const snapshot = {
+      label:        method.label,
+      type:         method.type,
+      instructions: method.instructions,
+      accountName:  method.accountName,
+      accountNumber:method.accountNumber,
+    };
+
+    const checkout = await orders.createWithStockReservation({
+      userId: user.id, customerName, phone, address, city, note,
+      items: lineItems,
+      paymentMethodId: method.id,
+      paymentMethodSnapshot: snapshot,
+      deliveryFee,
+      taxAmount,
+      returnWindowDays: Number(settings.returnWindowDays),
+      paymentDeadline: deadline,
+      customerEmail: user.email,
+      storeNotificationEmail: config.storeNotificationEmail,
+      sellerSnapshot: {
+        name: settings.storeName || config.storeName,
+        address: settings.storeAddress || config.storeAddress,
+        phone: settings.storePhone || config.storePhone,
+        email: settings.storeEmail || config.storeEmail,
+      },
+      idempotencyKey,
+      requestFingerprint,
+    });
+    return json(res, checkout.replayed ? 200 : 201, checkout.response);
+  }
+
+  // ── Download Invoice PDF (Finding #5) ──────────────────────────────────────
+  if (/^\/api\/orders\/[a-zA-Z0-9-]+\/invoice\.pdf$/.test(path) && method === 'GET') {
+    const user = await authUser(req);
+    const id = path.split('/')[3];
+    const order = await orders.findById(id);
+    ensure(order && (order.userId === user.id || user.role === 'ADMIN'), 404, 'Order not found');
+    const settings = await storeSettings.get();
+    const pdfBuffer = await generateInvoicePdf(order, settings);
+    res.writeHead(200, {
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename="invoice-${order.invoiceNumber || order.id}.pdf"`,
+      'Cache-Control': 'private, no-cache',
+      'Content-Length': pdfBuffer.length,
+      'X-Robots-Tag': 'noindex, nofollow',
+    });
+    return res.end(pdfBuffer);
+  }
+
+  // ── Get a single order (customer or admin) ─────────────────────────────────
+  if (/^\/api\/orders\/[a-zA-Z0-9-]+$/.test(path) && method === 'GET') {
+    const user  = await authUser(req);
+    const id    = path.split('/').pop();
+    const order = await orders.findById(id);
+    ensure(order && (order.userId === user.id || user.role === 'ADMIN'), 404, 'Order not found');
+    if (user.role === 'ADMIN') return json(res, 200, { order });
+    const settings = await storeSettings.get();
+    return json(res, 200, { order: {
+      ...order,
+      ...customerReturnSummary(order, settings.returnWindowDays),
+      refunds: (order.refunds || []).map(({ amount, reason, createdAt }) => ({ amount, reason, createdAt })),
+    } });
+  }
+
+  // ── Admin: invoice email delivery status and retry ─────────────────────────
+  if (path === '/api/admin/email-outbox' && method === 'GET') {
+    await authUser(req, true);
+    const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit')) || 100));
+    return json(res, 200, { jobs: await emailOutbox.list(limit) });
+  }
+
+  const emailAction = path.match(/^\/api\/admin\/email-outbox\/([a-f0-9-]+)\/(retry|resend)$/i);
+  if (emailAction && method === 'POST') {
+    const admin = await authUser(req, true);
+    verifyCsrf(req);
+    const action = emailAction[2];
+    if (action === 'resend') {
+      const body = await bodyJson(req);
+      ensure(body.confirm === true, 400, 'Confirm that you want to resend to recipients who already received this email.');
+    }
+    const result = await emailOutbox.requeue(emailAction[1], { resendAll: action === 'resend' });
+    ensure(result.found, 404, 'Email delivery job not found');
+    ensure(result.requeued, 409, result.reason || 'Email job could not be queued');
+    await auditLog.record({ action: action === 'resend' ? 'EMAIL_RESENT' : 'EMAIL_RETRY_QUEUED', adminId: admin.id, detail: emailAction[1] });
+    return json(res, 202, { ok: true, status: 'PENDING' });
+  }
+
+  // ── Admin: stats ──────────────────────────────────────────────────────────
+  if (path === '/api/admin/stats' && method === 'GET') {
+    await authUser(req, true);
+    const [productCount, customerCount, orderCount, revenue, openOrders] = await Promise.all([
+      products.countActive(),
+      users.countCustomers(),
+      orders.count(),
+      orders.sumRevenue(),
+      orders.countOpen(),
+    ]);
+    return json(res, 200, { stats: { products: productCount, customers: customerCount, orders: orderCount, revenue, openOrders } });
+  }
+
+  // ── Admin: orders ─────────────────────────────────────────────────────────
+  if (path === '/api/admin/orders' && method === 'GET') {
+    await authUser(req, true);
+    const status        = url.searchParams.get('status') || '';
+    const paymentStatus = url.searchParams.get('paymentStatus') || '';
+    const search        = cleanText(url.searchParams.get('search') || '', 100);
+    const rawLimit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : Number.NaN;
+    const rawSkip = url.searchParams.has('skip') ? Number(url.searchParams.get('skip')) : Number.NaN;
+    const limit  = Number.isSafeInteger(rawLimit) ? Math.min(200, Math.max(1, rawLimit)) : 100;
+    const skip   = Number.isSafeInteger(rawSkip) ? Math.min(1_000_000, Math.max(0, rawSkip)) : 0;
+    const result = await orders.listAdmin({
+      limit, skip,
+      status:        status        || undefined,
+      paymentStatus: paymentStatus || undefined,
+      search:        search        || undefined,
+    });
+    return json(res, 200, { orders: result, hasMore: result.length === limit, openCount: await orders.countOpen() });
+  }
+
+  // ── Admin: confirm payment ─────────────────────────────────────────────────
+  if (/^\/api\/admin\/orders\/[a-zA-Z0-9-]+\/confirm-payment$/.test(path) && method === 'POST') {
+    const admin = await authUser(req, true);
+    verifyCsrf(req);
+    const orderId = path.split('/')[4];
+    const { paymentRef, note } = await bodyJson(req);
+    ensure(typeof paymentRef === 'string' && paymentRef.trim().length >= 2, 400, 'Payment reference is required');
+    const changed = await orders.confirmPayment({ orderId, adminId: admin.id, paymentRef: paymentRef.trim(), note: (note || '').trim() });
+    ensure(changed, 409, 'Order is not in PENDING state or was already confirmed');
+    return json(res, 200, { ok: true });
+  }
+
+  const adminReturnPath = path.match(/^\/api\/admin\/orders\/([a-zA-Z0-9-]+)\/returns\/([a-zA-Z0-9-]+)\/(review|receive)$/);
+  if (adminReturnPath && method === 'POST') {
+    const admin = await authUser(req, true);
+    verifyCsrf(req);
+    const body = await bodyJson(req);
+    if (adminReturnPath[3] === 'review') {
+      const decision = cleanText(body.decision, 20).toUpperCase();
+      ensure(['APPROVED', 'REJECTED'].includes(decision), 400, 'Choose approve or reject for this return request.');
+      const reviewNote = cleanText(body.reviewNote || '', 300);
+      const result = await orders.reviewReturnRequest({
+        orderId: adminReturnPath[1], requestId: adminReturnPath[2], adminId: admin.id, decision, reviewNote,
+      });
+      return json(res, 200, result);
+    }
+    ensure(Array.isArray(body.items) && body.items.length <= 50, 400, 'Return receipt items are invalid.');
+    const receivedItems = body.items.map(item => ({
+      productId: cleanText(item?.productId, 60),
+      quantityReceived: Number(item?.quantityReceived),
+      restockQuantity: Number(item?.restockQuantity),
+    }));
+    ensure(receivedItems.every(item => item.productId && Number.isSafeInteger(item.quantityReceived) && item.quantityReceived >= 0 && Number.isSafeInteger(item.restockQuantity) && item.restockQuantity >= 0), 400, 'Returned and restock quantities must be non-negative whole numbers.');
+    const note = cleanText(body.note || '', 300);
+    const result = await orders.receiveReturnRequest({
+      orderId: adminReturnPath[1], requestId: adminReturnPath[2], adminId: admin.id, receivedItems, note,
+    });
+    return json(res, 200, result);
+  }
+
+  // A refund entry records a refund already issued through the configured manual payment method.
+  if (/^\/api\/admin\/orders\/[a-zA-Z0-9-]+\/refund$/.test(path) && method === 'POST') {
+    const admin = await authUser(req, true);
+    verifyCsrf(req);
+    const orderId = path.split('/')[4];
+    const body = await bodyJson(req);
+    const amount = Number(body.amount);
+    const reason = cleanText(body.reason, 300);
+    const paymentRef = cleanText(body.paymentRef, 100);
+    ensure(Number.isSafeInteger(amount) && amount > 0, 400, 'Enter a whole-number refund amount in RWF.');
+    ensure(reason.length >= 3, 400, 'Enter a reason for the refund.');
+    ensure(paymentRef.length >= 2, 400, 'Enter the reference for the refund you issued.');
+    const result = await orders.refundOrder({ orderId, adminId: admin.id, amount, reason, paymentRef });
+    return json(res, 201, result);
+  }
+
+  // ── Admin: cancel order ────────────────────────────────────────────────────
+  if (/^\/api\/admin\/orders\/[a-zA-Z0-9-]+\/cancel$/.test(path) && method === 'POST') {
+    const admin = await authUser(req, true);
+    verifyCsrf(req);
+    const orderId = path.split('/')[4];
+    const { reason } = await bodyJson(req);
+    const changed = await orders.cancelOrder({ orderId, adminId: admin.id, reason: reason || '' });
+    if (!changed) return json(res, 200, { ok: true, alreadyCancelled: true });
+    return json(res, 200, { ok: true });
+  }
+
+  // ── Admin: fulfillment status ──────────────────────────────────────────────
+  if (/^\/api\/admin\/orders\/[a-zA-Z0-9-]+\/fulfillment$/.test(path) && method === 'PATCH') {
+    const admin = await authUser(req, true);
+    verifyCsrf(req);
+    const orderId = path.split('/')[4];
+    const { status } = await bodyJson(req);
+    const allowed = ['PLACED','CONFIRMED','PACKING','OUT_FOR_DELIVERY','DELIVERED'];
+    ensure(allowed.includes(status), 400, 'Invalid fulfillment status');
+    const order = await orders.findById(orderId);
+    ensure(order, 404, 'Order not found');
+    // Fulfillment can only advance if payment is PAID (except CANCELLED which uses /cancel)
+    if (status === 'DELIVERED') {
+      ensure(order.paymentStatus === 'PAID', 409, 'Cannot mark delivered — payment not confirmed');
+    }
+    const changed = await orders.updateFulfillment({ orderId, adminId: admin.id, fulfillmentStatus: status });
+    ensure(changed, 409, 'Fulfillment status must move forward on a paid order');
+    return json(res, 200, { ok: true, fulfillmentStatus: status });
+  }
+
+  // ── Admin: audit log for order ─────────────────────────────────────────────
+  if (/^\/api\/admin\/orders\/[a-zA-Z0-9-]+\/audit$/.test(path) && method === 'GET') {
+    await authUser(req, true);
+    const orderId = path.split('/')[4];
+    return json(res, 200, { audit: await auditLog.listForOrder(orderId) });
+  }
+
+  // ── Admin: products ────────────────────────────────────────────────────────
+  if (path === '/api/admin/uploads/product-image' && method === 'POST') {
+    await authUser(req, true);
+    verifyCsrf(req);
+    ensure(cloudinaryUploadEnabled(), 503, 'Product image uploads need Cloudinary storage configured by the store owner.');
+    const { dataUrl } = await bodyJson(req, 12 * 1024 * 1024);
+    const image = await uploadProductImage(dataUrl);
+    return json(res, 201, { imageUrl: image.secureUrl, publicId: image.publicId });
+  }
+
+  if (path === '/api/admin/products' && method === 'GET') {
+    await authUser(req, true);
+    const result = await products.list({ limit: 200, includeInactive: true });
+    return json(res, 200, result);
+  }
+
+  if (path === '/api/admin/products' && method === 'POST') {
+    await authUser(req, true);
+    verifyCsrf(req);
+    const fields = await sanitizeProduct(await bodyJson(req));
+    for (const image of fields.images || []) {
+      if (image.publicId) ensure(await products.countImageReferences(image.publicId) === 0, 409, 'This uploaded image is already assigned to another product.');
+    }
+    const id   = randomUUID();
+    const slug = `${slugify(fields.name)}-${id.slice(0, 6)}`;
+    await products.create({
+      id, slug, ...fields,
+      description: fields.description || '',
+      imageUrl:    fields.imageUrl    || '',
+      imagePublicId: fields.imagePublicId || '',
+      images: fields.images || [],
+      featured:    fields.featured    || false,
+      active:      true,
+      createdAt:   new Date(),
+      updatedAt:   new Date(),
+    });
+    return json(res, 201, { id, slug });
+  }
+
+  if (/^\/api\/admin\/products\/[a-zA-Z0-9-]+\/stock$/.test(path) && method === 'POST') {
+    const admin = await authUser(req, true);
+    verifyCsrf(req);
+    const productId = path.split('/')[4];
+    const body = await bodyJson(req);
+    const delta = Number(body.delta);
+    const reason = cleanText(body.reason, 300);
+    ensure(Number.isSafeInteger(delta) && delta !== 0 && Math.abs(delta) <= 1_000_000, 400, 'Enter a non-zero whole-number stock adjustment.');
+    ensure(reason.length >= 3, 400, 'Enter a short reason for the stock adjustment.');
+    const adjustment = await products.adjustStock({ productId, adminId: admin.id, delta, reason });
+    return json(res, 200, { adjustment });
+  }
+
+  const inventoryHistory = path.match(/^\/api\/admin\/products\/([a-zA-Z0-9-]+)\/inventory-adjustments$/);
+  if (inventoryHistory && method === 'GET') {
+    await authUser(req, true);
+    const history = await products.listAdjustments(inventoryHistory[1], Number(url.searchParams.get('limit')) || 50);
+    return json(res, 200, { adjustments: history });
+  }
+
+  if (/^\/api\/admin\/products\/[a-zA-Z0-9-]+$/.test(path)) {
+    await authUser(req, true);
+    const id = path.split('/').pop();
+    const existing = await products.findById(id);
+    ensure(existing, 404, 'Product not found');
+    if (method === 'DELETE') {
+      verifyCsrf(req);
+      await products.softDelete(id);
+      return json(res, 200, { ok: true });
+    }
+    if (method === 'PATCH') {
+      verifyCsrf(req);
+      const body = await bodyJson(req);
+      ensure(body.stock === undefined, 400, 'Use the stock adjustment action to change inventory.');
+      if (typeof body.categorySlug === 'string' && slugify(cleanText(body.categorySlug, 80)) === existing.categorySlug) {
+        delete body.categorySlug; // Let an existing product remain in its archived category while other fields are edited.
+      }
+      if (body.images === undefined && body.imageUrl !== undefined && body.imageUrl !== existing.imageUrl && body.imagePublicId === undefined) {
+        body.imagePublicId = '';
+      }
+      if (body.imagePublicId === '' && body.imageUrl === existing.imageUrl) delete body.imagePublicId;
+      const fields = await sanitizeProduct(body, true, existing);
+      ensure(Object.keys(fields).length > 0, 400, 'No valid changes');
+      const previousImages = productImages(existing);
+      const nextImages = fields.images ?? previousImages;
+      const previousIds = new Set(previousImages.map(image => image.publicId).filter(Boolean));
+      const nextIds = new Set(nextImages.map(image => image.publicId).filter(Boolean));
+      for (const publicId of nextIds) {
+        if (!previousIds.has(publicId)) ensure(await products.countImageReferences(publicId, id) === 0, 409, 'This uploaded image is already assigned to another product.');
+      }
+      await products.update(id, fields);
+      let imageCleanupFailed = false;
+      for (const publicId of previousIds) {
+        if (nextIds.has(publicId)) continue;
+        try {
+          const stillUsed = await products.countImageReferences(publicId, id);
+          if (!stillUsed) await deleteProductImage(publicId);
+          else imageCleanupFailed = true;
+        } catch (error) {
+          imageCleanupFailed = true;
+          console.warn('[media] Previous product image cleanup failed:', error?.code || 'CLEANUP_ERROR');
+        }
+      }
+      return json(res, 200, { ok: true, imageCleanupFailed });
+    }
+  }
+
+  // ── Admin: categories ──────────────────────────────────────────────────────
+  if (path === '/api/admin/categories' && method === 'GET') {
+    await authUser(req, true);
+    return json(res, 200, { categories: await categories.list({ includeArchived: true }) });
+  }
+
+  if (path === '/api/admin/categories' && method === 'POST') {
+    await authUser(req, true);
+    verifyCsrf(req);
+    const { name: rawName } = await bodyJson(req);
+    const name = cleanText(rawName, 80);
+    const slug = slugify(name);
+    ensure(name.length >= 2 && slug, 400, 'Enter a valid category name');
+    const existing = await categories.findBySlug(slug);
+    ensure(!existing, 409, 'Category already exists');
+    const id = randomUUID();
+    await categories.create({ id, name, slug });
+    return json(res, 201, { id, name, slug });
+  }
+
+  const adminCategory = path.match(/^\/api\/admin\/categories\/([a-zA-Z0-9-]+)$/);
+  if (adminCategory) {
+    const admin = await authUser(req, true);
+    const category = await categories.findById(adminCategory[1]);
+    ensure(category, 404, 'Category not found.');
+    if (method === 'PATCH') {
+      verifyCsrf(req);
+      ensure(category.active !== false, 409, 'Archived categories cannot be edited.');
+      const { name: rawName } = await bodyJson(req);
+      const name = cleanText(rawName, 80);
+      ensure(name.length >= 2, 400, 'Enter a category name with at least two characters.');
+      const duplicate = await categories.findByName(name);
+      ensure(!duplicate || duplicate.id === category.id, 409, 'A category with that name already exists.');
+      await categories.rename(category.id, name);
+      await auditLog.record({ action: 'CATEGORY_RENAMED', adminId: admin.id, detail: `${category.name} → ${name}` });
+      return json(res, 200, { ok: true, name });
+    }
+    if (method === 'DELETE') {
+      verifyCsrf(req);
+      ensure(category.active !== false, 409, 'Category is already archived.');
+      const productCount = await products.countActiveByCategory(category.id, category.slug);
+      ensure(productCount === 0, 409, 'Move or hide the category’s products before archiving it.');
+      await categories.archive(category.id);
+      await auditLog.record({ action: 'CATEGORY_ARCHIVED', adminId: admin.id, detail: category.slug });
+      return json(res, 200, { ok: true });
+    }
+  }
+
+  // ── Admin: payment methods ─────────────────────────────────────────────────
+  if (path === '/api/admin/mfa/setup' && method === 'POST') {
+    const admin = await authUser(req, true);
+    verifyCsrf(req);
+    await rateLimit(ip, `mfa-setup:${admin.id}`, 5, 15 * 60 * 1000);
+    const { currentCode } = await bodyJson(req);
+    if (admin.mfaEnabled) {
+      ensure(typeof currentCode === 'string' && currentCode.length > 0, 400, 'Enter your current authenticator or recovery code to replace MFA');
+      const activeRecord = await adminMfa.find(admin.id);
+      let activeSecret = '';
+      try { activeSecret = decryptTotpSecret(activeRecord?.secret); } catch {}
+      const validCurrentTotp = activeSecret && verifyTotp(activeSecret, currentCode);
+      const validCurrentRecovery = !validCurrentTotp && await adminMfa.consumeRecoveryCode(admin.id, hashRecoveryCode(currentCode));
+      ensure(validCurrentTotp || validCurrentRecovery, 401, 'Current authenticator or recovery code is invalid');
+    }
+    const secret = createTotpSecret();
+    const recoveryCodes = createRecoveryCodes();
+    await adminMfa.savePending(admin.id, encryptTotpSecret(secret), recoveryCodes.map(hashRecoveryCode));
+    return json(res, 200, {
+      secret,
+      recoveryCodes,
+      provisioningUri: totpProvisioningUri(admin.email, secret),
+    });
+  }
+
+  if (path === '/api/admin/mfa/verify' && method === 'POST') {
+    const admin = await authUser(req, true);
+    verifyCsrf(req);
+    await rateLimit(ip, `mfa-verify:${admin.id}`, 5, 15 * 60 * 1000);
+    const { code } = await bodyJson(req);
+    const record = await adminMfa.find(admin.id);
+    let secret = '';
+    try { secret = decryptTotpSecret(record?.pendingSecret); } catch {}
+    ensure(secret && verifyTotp(secret, code), 400, 'Authenticator code is invalid or setup has expired');
+    ensure(await adminMfa.activate(admin.id), 409, 'MFA setup could not be confirmed; start again');
+    clearSessionCookie(res);
+    return json(res, 200, { ok: true, reauthenticationRequired: true });
+  }
+
+  if (path === '/api/admin/settings' && method === 'GET') {
+    await authUser(req, true);
+    return json(res, 200, { settings: await storeSettings.get() });
+  }
+
+  if (path === '/api/admin/settings' && method === 'PATCH') {
+    const admin = await authUser(req, true);
+    verifyCsrf(req);
+    const b = await bodyJson(req);
+    const fields = {};
+    if (b.storeName !== undefined) {
+      fields.storeName = cleanText(b.storeName, 100);
+      ensure(fields.storeName.length >= 2, 400, 'Store name must be at least 2 characters');
+    }
+    if (b.storeAddress !== undefined) {
+      fields.storeAddress = cleanText(b.storeAddress, 200);
+      ensure(fields.storeAddress.length >= 3, 400, 'Enter the store address');
+    }
+    if (b.storePhone !== undefined) {
+      fields.storePhone = cleanText(b.storePhone, 30);
+      ensure(fields.storePhone.replace(/\D/g, '').length >= 8, 400, 'Enter a valid store phone number');
+    }
+    if (b.storeEmail !== undefined) {
+      fields.storeEmail = cleanText(b.storeEmail, 254).toLowerCase();
+      ensure(!fields.storeEmail || validEmail(fields.storeEmail), 400, 'Enter a valid store email');
+    }
+    for (const key of ['deliveryFeeFlat', 'taxRatePercent', 'invoiceExpiryHours']) {
+      if (b[key] === undefined) continue;
+      const value = Number(b[key]);
+      ensure(Number.isSafeInteger(value), 400, `${key} must be a whole number`);
+      if (key === 'deliveryFeeFlat') ensure(value >= 0 && value <= 100_000_000, 400, 'Delivery fee must be between 0 and 100,000,000 RWF');
+      if (key === 'taxRatePercent') ensure(value >= -1 && value <= 100, 400, 'Tax must be -1 (not configured) or 0–100 percent');
+      if (key === 'invoiceExpiryHours') ensure(value >= 1 && value <= 720, 400, 'Payment deadline must be 1–720 hours');
+      fields[key] = value;
+    }
+    if (b.returnWindowDays !== undefined) {
+      const value = Number(b.returnWindowDays);
+      ensure(Number.isSafeInteger(value) && value >= 0 && value <= 365, 400, 'Return window must be 0–365 days (0 disables customer return requests).');
+      fields.returnWindowDays = value;
+    }
+    ensure(Object.keys(fields).length > 0, 400, 'No valid settings were provided');
+    await storeSettings.update(fields);
+    await auditLog.record({ action: 'STORE_SETTINGS_UPDATED', adminId: admin.id, detail: Object.keys(fields).join(',') });
+    return json(res, 200, { ok: true, settings: await storeSettings.get() });
+  }
+
+  if (path === '/api/admin/payment-methods' && method === 'GET') {
+    await authUser(req, true);
+    return json(res, 200, { paymentMethods: await paymentMethods.list() });
+  }
+
+  if (path === '/api/admin/payment-methods' && method === 'POST') {
+    await authUser(req, true);
+    verifyCsrf(req);
+    const b = await bodyJson(req);
+    const label        = cleanText(b.label, 100);
+    const instructions = cleanText(b.instructions, 2000);
+    const type         = cleanText(b.type, 50); // e.g. BANK_TRANSFER, MOBILE_MONEY
+    ensure(label.length >= 2 && instructions.length >= 10, 400, 'Label and instructions are required (instructions ≥ 10 chars)');
+    ensure(['BANK_TRANSFER','MOBILE_MONEY','OTHER'].includes(type), 400, 'Type must be BANK_TRANSFER, MOBILE_MONEY or OTHER');
+    const id = randomUUID();
+    await paymentMethods.create({
+      id, label, type, instructions,
+      accountName:   cleanText(b.accountName   || '', 150),
+      accountNumber: cleanText(b.accountNumber || '', 100),
+      enabled:       true,
+      order:         Date.now(),
+    });
+    return json(res, 201, { id });
+  }
+
+  if (/^\/api\/admin\/payment-methods\/[a-zA-Z0-9-]+$/.test(path)) {
+    await authUser(req, true);
+    const id = path.split('/').pop();
+    const existing = await paymentMethods.findById(id);
+    ensure(existing, 404, 'Payment method not found');
+    if (method === 'PATCH') {
+      verifyCsrf(req);
+      const b = await bodyJson(req);
+      const fields = {};
+      if (b.label        !== undefined) fields.label        = cleanText(b.label, 100);
+      if (b.instructions !== undefined) fields.instructions = cleanText(b.instructions, 2000);
+      if (b.accountName  !== undefined) fields.accountName  = cleanText(b.accountName, 150);
+      if (b.accountNumber!== undefined) fields.accountNumber= cleanText(b.accountNumber, 100);
+      if (b.enabled      !== undefined) fields.enabled       = !!b.enabled;
+      ensure(Object.keys(fields).length > 0, 400, 'No valid changes');
+      if (fields.label !== undefined) ensure(fields.label.length >= 2, 400, 'Label must be at least 2 characters');
+      if (fields.instructions !== undefined) ensure(fields.instructions.length >= 10, 400, 'Instructions must be at least 10 characters');
+      if (b.enabled !== undefined) {
+        ensure(typeof b.enabled === 'boolean', 400, 'enabled must be true or false');
+        fields.enabled = b.enabled;
+      }
+      await paymentMethods.update(id, fields);
+      return json(res, 200, { ok: true });
+    }
+    if (method === 'DELETE') {
+      verifyCsrf(req);
+      await paymentMethods.delete(id);
+      return json(res, 200, { ok: true });
+    }
+  }
+
+  fail(404, 'API endpoint not found');
 }
-async function serveStatic(req,res,url) {
-  if(req.method !== 'GET' && req.method !== 'HEAD') return json(res,405,{error:'Method not allowed'});
-  let path;
-  try {path=decodeURIComponent(url.pathname);} catch {return json(res,400,{error:'Invalid path'});}
-  if(path==='/' || path==='/shop') path='/index.html';
-  if(path==='/admin') path='/admin.html';
-  if(path==='/orders') path='/orders.html';
-  const target=resolve(publicDir,`.${path}`);
-  if(target!==publicDir && !target.startsWith(publicDir+sep)) return json(res,403,{error:'Forbidden'});
-  try {
-    const info=await stat(target); if(!info.isFile()) return json(res,404,{error:'Not found'});
-    const contents=await readFile(target);
-    res.writeHead(200,{'Content-Type':mime[extname(target)]||'application/octet-stream',
-      'Cache-Control':target.endsWith('.html')?'no-cache':'public, max-age=3600',
-      'X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Referrer-Policy':'strict-origin-when-cross-origin',
-      'Content-Security-Policy':"default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' https:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"});
-    if(req.method==='HEAD')return res.end();res.end(contents);
-  } catch {json(res,404,{error:'Not found'});}
+
+// ─── Static file server ───────────────────────────────────────────────────────
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, character => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[character]);
 }
-const server=http.createServer(async (req,res)=>{
+
+async function sendNotFound(req, res, publicDir) {
+  const page = await readFile(resolve(publicDir, '404.html'));
+  res.writeHead(404, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': 'no-cache',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  if (req.method === 'HEAD') return res.end();
+  return res.end(page);
+}
+
+async function serveStatic(req, res, url) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return json(res, 405, { error: 'Method not allowed' });
+  let urlPath;
+  try { urlPath = decodeURIComponent(url.pathname); } catch { return json(res, 400, { error: 'Invalid path' }); }
+
+  if (urlPath.startsWith('/products/')) {
+    const slug = urlPath.slice('/products/'.length);
+    if (!slug || slug.includes('/')) return sendNotFound(req, res, publicDir);
+    const product = await products.findBySlug(slug) || await products.findById(slug);
+    if (!product || !product.active) return sendNotFound(req, res, publicDir);
+    const baseUrl = config.appBaseUrl || `${config.isProduction ? 'https' : 'http'}://${req.headers.host || 'localhost:4000'}`;
+    const canonical = `${baseUrl.replace(/\/+$/, '')}/products/${encodeURIComponent(product.slug || product.id)}`;
+    const image = product.imageUrl || '/assets/products/fallback.png';
+    const imageUrl = /^https:\/\//i.test(image) ? image : new URL(image, baseUrl).href;
+    const description = product.description || `${product.name} is available at IwacuMall in Kigali.`;
+    const schema = {
+      '@context': 'https://schema.org',
+      '@type': 'Product',
+      name: product.name,
+      description,
+      image: imageUrl,
+      sku: product.id,
+      category: product.category || product.categorySlug || 'Everyday Essentials',
+      brand: { '@type': 'Brand', name: 'IwacuMall' },
+      offers: {
+        '@type': 'Offer',
+        priceCurrency: config.currency,
+        price: product.price,
+        availability: product.stock > 0 ? 'https://schema.org/InStock' : 'https://schema.org/OutOfStock',
+        url: canonical,
+      },
+    };
+    const template = await readFile(resolve(publicDir, 'product.html'), 'utf8');
+    const replacements = {
+      __PRODUCT_NAME__: escapeHtml(product.name),
+      __PRODUCT_DESCRIPTION__: escapeHtml(description),
+      __PRODUCT_CANONICAL__: escapeHtml(canonical),
+      __PRODUCT_IMAGE__: escapeHtml(imageUrl),
+      __PRODUCT_CATEGORY__: escapeHtml(product.category || product.categorySlug || 'Everyday Essentials'),
+      __PRODUCT_PRICE__: Number(product.price || 0).toLocaleString('en-US'),
+      __PRODUCT_STOCK_CLASS__: product.stock > 0 ? 'stock-in' : 'stock-out',
+      __PRODUCT_STOCK__: product.stock > 0 ? `In stock (${product.stock} available)` : 'Out of stock',
+      __PRODUCT_SCHEMA__: JSON.stringify(schema).replace(/</g, '\\u003c'),
+    };
+    const html = template.replace(/__PRODUCT_[A-Z_]+__/g, token => replacements[token] ?? '');
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'public, max-age=60, stale-while-revalidate=300',
+      'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options': 'DENY',
+      'Referrer-Policy': 'strict-origin-when-cross-origin',
+      'Content-Security-Policy': "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style; script-src 'self' https://accounts.google.com/gsi/client; connect-src 'self' https://accounts.google.com/gsi/; frame-src https://accounts.google.com/gsi/; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
+      'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+    });
+    if (req.method === 'HEAD') return res.end();
+    return res.end(html);
+  }
+
+  // ── SEO Discovery Routes (Finding #11) ──────────────────────────────────────
+  if (urlPath === '/robots.txt') {
+    const robots = generateRobotsTxt(req);
+    res.writeHead(200, {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'public, max-age=86400',
+    });
+    if (req.method === 'HEAD') return res.end();
+    return res.end(robots);
+  }
+
+  if (urlPath === '/sitemap.xml') {
+    try {
+      const sitemap = await generateSitemapXml(req);
+      res.writeHead(200, {
+        'Content-Type': 'application/xml; charset=utf-8',
+        'Cache-Control': 'public, max-age=3600',
+      });
+      if (req.method === 'HEAD') return res.end();
+      return res.end(sitemap);
+    } catch (err) {
+      console.warn('[seo] Sitemap generation failed:', err?.message);
+    }
+  }
+
+  if (urlPath === '/' || urlPath === '/shop')      urlPath = '/index.html';
+  if (urlPath === '/admin')                        urlPath = '/admin.html';
+  if (urlPath === '/orders')                       urlPath = '/orders.html';
+  if (urlPath === '/invoice')                      urlPath = '/invoice.html';
+  if (urlPath === '/account')                      urlPath = '/account.html';
+  if (urlPath === '/reset-password')               urlPath = '/reset-password.html';
+  if (urlPath === '/privacy')                      urlPath = '/privacy.html';
+  if (urlPath === '/terms')                        urlPath = '/terms.html';
+  if (urlPath === '/delivery-policy')              urlPath = '/delivery-policy.html';
+  if (urlPath.startsWith('/categories/'))          urlPath = '/index.html';
+
+  const target = resolve(publicDir, `.${urlPath}`);
+  if (target !== publicDir && !target.startsWith(publicDir + sep)) return json(res, 403, { error: 'Forbidden' });
   try {
-    const url=new URL(req.url,`http://${req.headers.host||'localhost'}`);
-    const origin=req.headers.origin;
-    const trustedOrigin=!origin || extraOrigins.includes(origin) || new URL(origin).host===req.headers.host;
-    if(origin && !trustedOrigin && url.pathname.startsWith('/api')) return json(res,403,{error:'Origin not allowed'});
-    if(origin && trustedOrigin){res.setHeader('Access-Control-Allow-Origin',origin);res.setHeader('Vary','Origin');res.setHeader('Access-Control-Allow-Headers','Authorization, Content-Type');res.setHeader('Access-Control-Allow-Methods','GET, POST, PATCH, DELETE, OPTIONS');}
-    if(req.method==='OPTIONS') {res.writeHead(204);return res.end();}
-    if(url.pathname.startsWith('/api/')) return await api(req,res,url);
-    return await serveStatic(req,res,url);
-  }catch(e) {
-    const status=Number(e?.status)||500;
-    if(status===500)console.error('[server]',e);
-    if(!res.headersSent)json(res,status,{error:status===500?'Unexpected server error':e.message});
+    const info = await stat(target);
+    if (!info.isFile()) throw new Error('Not a file');
+    const contents = await readFile(target);
+    const isHtml = target.endsWith('.html');
+    const noIndex = ['/admin', '/admin.html', '/orders', '/orders.html', '/invoice', '/invoice.html', '/reset-password', '/reset-password.html'].includes(url.pathname);
+    res.writeHead(200, {
+      'Content-Type'          : mime[extname(target)] || 'application/octet-stream',
+      'Cache-Control'         : isHtml ? 'no-cache' : 'public, max-age=3600',
+      'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options'       : 'DENY',
+      'Referrer-Policy'       : 'strict-origin-when-cross-origin',
+      'Content-Security-Policy': "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style; script-src 'self' https://accounts.google.com/gsi/client; connect-src 'self' https://accounts.google.com/gsi/; frame-src https://accounts.google.com/gsi/; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
+      'Permissions-Policy'    : 'camera=(), microphone=(), geolocation=()',
+      ...(noIndex ? { 'X-Robots-Tag': 'noindex, nofollow' } : {}),
+    });
+    if (req.method === 'HEAD') return res.end();
+    res.end(contents);
+  } catch {
+    // Serve clean 404 page for missing pages
+    try {
+      const notFoundPage = await readFile(resolve(publicDir, '404.html'));
+      res.writeHead(404, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-cache',
+        'X-Content-Type-Options': 'nosniff',
+      });
+      if (req.method === 'HEAD') return res.end();
+      res.end(notFoundPage);
+    } catch {
+      json(res, 404, { error: 'Not found' });
+    }
+  }
+}
+
+// ─── HTTP server ──────────────────────────────────────────────────────────────
+
+export const server = http.createServer(async (req, res) => {
+  try {
+    const url    = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const origin = req.headers.origin;
+
+    // CORS
+    const trustedOrigin = !origin ||
+      config.corsOrigins.includes(origin) ||
+      new URL(origin).host === req.headers.host;
+    if (origin && !trustedOrigin && url.pathname.startsWith('/api')) {
+      return json(res, 403, { error: 'Origin not allowed' });
+    }
+    if (origin && trustedOrigin) {
+      res.setHeader('Access-Control-Allow-Origin',  origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-CSRF-Token');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+    }
+    if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
+
+    if (url.pathname.startsWith('/api/')) return await api(req, res, url);
+    return await serveStatic(req, res, url);
+  } catch (e) {
+    const status = Number(e?.status) || 500;
+    if (status === 500) console.error('[server]', e.message, e.stack?.split('\n').slice(0,3).join(' | '));
+    if (!res.headersSent) json(res, status, { error: status === 500 ? 'Unexpected server error' : e.message });
   }
 });
-if(process.env.NODE_ENV!=='test')server.listen(PORT,HOST,()=>console.log(`IwacuMall running on http://${HOST}:${PORT}`));
-export {server};
+
+// ─── Startup ──────────────────────────────────────────────────────────────────
+
+if (!config.isTest) {
+  try {
+    await connectDb();
+    await seed();
+  } catch (err) {
+    console.error('[startup] Fatal:', err.message);
+    process.exit(1);
+  }
+
+  const sweepExpiredInvoices = async () => {
+    try {
+      const count = await orders.expireOverdueOrders();
+      if (count) console.info(`[orders] Expired ${count} overdue invoice(s) and restored reserved stock.`);
+    } catch (err) {
+      console.warn('[orders] Invoice expiry sweep failed:', err?.message || 'unknown');
+    }
+  };
+  await sweepExpiredInvoices();
+  const invoiceExpiryTimer = setInterval(() => { void sweepExpiredInvoices(); }, 60_000);
+  invoiceExpiryTimer.unref();
+  const emailOutboxTimer = startEmailOutboxWorker();
+
+  server.listen(PORT, HOST, () => {
+    console.log(`IwacuMall running on http://${HOST}:${PORT} [${config.nodeEnv}]`);
+  });
+
+  // Graceful shutdown
+  async function shutdown(signal) {
+    console.log(`[server] ${signal} — shutting down`);
+    clearInterval(invoiceExpiryTimer);
+    clearInterval(emailOutboxTimer);
+    server.close(async () => { await closeDb(); process.exit(0); });
+    setTimeout(() => process.exit(1), 10_000);
+  }
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT',  () => shutdown('SIGINT'));
+}

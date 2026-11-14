@@ -8,6 +8,7 @@
   <title>IwacuMall | Admin workspace</title>
   <link rel="icon" href="/assets/favicon.png">
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/overrides.css">
   <script type="module" src="/dashboard.js"></script>
 </head>
 <body class="admin-body" data-page="admin">
@@ -27,8 +28,10 @@
       <div class="sidebar-caption">WORKSPACE</div>
       <nav class="admin-nav">
         <button class="active" data-tab="orders"><span>▤</span> Orders <b id="sidebarOrderCount"></b></button>
+        <button data-tab="email"><span>✉</span> Email delivery</button>
         <button data-tab="products"><span>▦</span> Products</button>
         <button data-tab="categories"><span>◈</span> Categories</button>
+        <button data-tab="settings"><span>⚙</span> Store settings</button>
       </nav>
       <div class="sidebar-spacer"></div>
       <div class="sidebar-contact">
@@ -48,6 +51,26 @@
         <p>Sign in with the administrator account configured for this store to manage orders and products.</p>
         <a href="/" class="btn btn-primary">Go to sign in <span>→</span></a>
       </div>
+
+      <section id="adminMfaSetup" class="admin-locked" hidden>
+        <div class="locked-symbol">🛡️</div>
+        <div class="section-label">SECURE WORKSPACE</div>
+        <h1>Set up administrator two-factor authentication</h1>
+        <p>Add this account to an authenticator app, then enter its six-digit code to unlock the dashboard.</p>
+        <button class="btn btn-primary" id="beginMfaSetup" type="button">Create setup secret</button>
+        <div id="mfaSecretBox" hidden class="admin-card" style="margin:1rem auto;max-width:520px;text-align:left">
+          <strong>Manual setup key</strong>
+          <code id="mfaSecret" style="display:block;word-break:break-all;margin:.6rem 0"></code>
+          <p>Keep this key private. Enter it in your authenticator app as a time-based code account.</p>
+          <strong>One-use recovery codes</strong>
+          <pre id="mfaRecoveryCodes" style="white-space:pre-wrap;background:#f6f8fc;padding:.8rem;border-radius:8px"></pre>
+          <p>Save these somewhere private. Each code can be used once if you lose access to your authenticator.</p>
+          <form id="verifyMfaSetup" class="admin-form">
+            <label>Six-digit authenticator code<input name="code" class="form-control" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" minlength="6" maxlength="6" required></label>
+            <button class="btn btn-primary full" type="submit">Verify and enable MFA</button>
+          </form>
+        </div>
+      </section>
 
       <div id="adminContent" hidden>
         <div class="admin-page-heading">
@@ -73,6 +96,15 @@
             </select>
           </div>
           <div id="adminOrders" class="admin-order-list" aria-live="polite"></div>
+          <div class="products-load-more"><button id="loadMoreAdminOrders" class="btn btn-subtle" type="button" hidden>Load more orders</button></div>
+        </section>
+
+        <section id="panel-email" class="admin-panel" aria-labelledby="emailHeading">
+          <div class="admin-section-head">
+            <div><div class="section-label">CUSTOMER NOTIFICATIONS</div><h2 id="emailHeading">Order email delivery</h2><p>Check invoice and order status emails to the customer and configured store inbox. SMTP delivery is retried automatically.</p></div>
+            <button class="action-btn refresh-btn" id="refreshEmail"><span>↻</span> Refresh email status</button>
+          </div>
+          <div id="emailOutboxJobs" class="panel" aria-live="polite"><div class="empty-state">Loading email jobs…</div></div>
         </section>
 
         <section id="panel-products" class="admin-panel" aria-labelledby="productsHeading">
@@ -90,13 +122,18 @@
                 </div>
                 <label>Category<select id="adminCategorySelect" name="categorySlug" class="form-control" required></select></label>
                 <label>Description<textarea class="form-control" name="description" rows="3" placeholder="A short description for shoppers"></textarea></label>
-                <label>Product image URL<input class="form-control" name="imageUrl" placeholder="https://… or /assets/products/…"></label>
+                <label>Primary product image URL<input id="productImageUrl" class="form-control admin-product-image-url" name="imageUrl" placeholder="Upload photos or paste an HTTPS image URL"></label>
+                <input id="productImagePublicId" type="hidden" name="imagePublicId" value="">
+                <input id="productImages" type="hidden" name="images" value="[]">
+                <label>Upload product photos<input id="productImageFile" class="form-control" type="file" accept="image/png,image/jpeg,image/webp" multiple><small>Select up to 8 PNG, JPG or WebP photos · up to 8 MB each. Uploads use the store’s configured durable image storage.</small></label>
+                <div id="productImageUploadStatus" class="image-upload-status" role="status" aria-live="polite"></div>
+                <img id="productImagePreview" class="product-image-preview" alt="Product image preview" hidden>
                 <label class="admin-check"><input type="checkbox" name="featured" value="1"><span>Feature this product on the shop</span></label>
                 <button class="btn btn-primary full" type="submit">Add to catalog <span>→</span></button>
               </form>
             </section>
             <section class="admin-card inventory-card">
-              <div class="admin-card-title inventory-title"><div><h3>Catalog inventory</h3><p id="productCount">Manage listing details and stock.</p></div><label class="admin-search compact-search"><span>⌕</span><input id="productSearch" type="search" placeholder="Find a product" aria-label="Search products"></label></div>
+              <div class="admin-card-title inventory-title"><div><h3>Catalog inventory</h3><p id="productCount">Manage listing details and stock.</p></div><label class="admin-search compact-search"><span>⌕</span><input id="productSearch" type="search" placeholder="Find a product" aria-label="Search products"></label><label class="stock-filter-label">Stock view<select id="inventoryStockFilter" class="form-control"><option value="all">All stock</option><option value="low">Low stock (1–5)</option><option value="out">Out of stock</option></select></label></div>
               <div id="adminProducts" class="admin-product-list" aria-live="polite"></div>
             </section>
           </div>
@@ -117,6 +154,65 @@
             <section class="admin-card">
               <div class="admin-card-title"><div><h3>Store categories</h3><p>These categories are visible to shoppers.</p></div></div>
               <div id="adminCategories" class="admin-category-list" aria-live="polite"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="panel-settings" class="admin-panel" aria-labelledby="settingsHeading">
+          <div class="admin-section-head">
+            <div><div class="section-label">STORE CONFIGURATION</div><h2 id="settingsHeading">Store settings</h2><p>These values are used at checkout and printed on customer invoices.</p></div>
+          </div>
+          <div class="admin-products-layout">
+            <section class="admin-card">
+              <div class="admin-card-title"><div><h3>Administrator sign-in security</h3><p>Authenticator codes and recovery codes protect dashboard access.</p></div></div>
+              <button class="btn btn-subtle" id="rotateMfaSetup" type="button">Replace authenticator and recovery codes</button>
+              <div id="mfaRotationBox" hidden class="admin-card" style="margin-top:1rem;max-width:620px">
+                <strong>New manual setup key</strong>
+                <code id="mfaRotationSecret" style="display:block;word-break:break-all;margin:.6rem 0"></code>
+                <p>Keep this key private and add it to your authenticator app.</p>
+                <strong>New one-use recovery codes</strong>
+                <pre id="mfaRotationRecoveryCodes" style="white-space:pre-wrap;background:#f6f8fc;padding:.8rem;border-radius:8px"></pre>
+                <p>Replacing MFA invalidates the old authenticator and old recovery codes after confirmation.</p>
+                <form id="verifyMfaRotation" class="admin-form">
+                  <label>Six-digit code from the new authenticator<input name="code" class="form-control" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" minlength="6" maxlength="6" required></label>
+                  <button class="btn btn-primary" type="submit">Verify and replace MFA</button>
+                </form>
+              </div>
+            </section>
+            <section class="admin-card">
+              <div class="admin-card-title"><div><h3>Store details and checkout rules</h3><p>Changes apply to new orders immediately.</p></div></div>
+              <form id="storeSettingsForm" class="admin-form">
+                <label>Store name<input name="storeName" class="form-control" required maxlength="100"></label>
+                <label>Store address<input name="storeAddress" class="form-control" required maxlength="200"></label>
+                <div class="form-two">
+                  <label>Store phone<input name="storePhone" class="form-control" required maxlength="30"></label>
+                  <label>Store email<input name="storeEmail" type="email" class="form-control" maxlength="254"></label>
+                </div>
+                <div class="form-two">
+                  <label>Flat delivery fee (RWF)<input name="deliveryFeeFlat" type="number" class="form-control" min="0" step="1" required></label>
+                  <label>Invoice payment deadline (hours)<input name="invoiceExpiryHours" type="number" class="form-control" min="1" max="720" step="1" required></label>
+                </div>
+                <div class="form-two">
+                  <label>Tax rate percent (use -1 if not configured)<input name="taxRatePercent" type="number" class="form-control" min="-1" max="100" step="1" required></label>
+                  <label>Customer return request window (days)<input name="returnWindowDays" type="number" class="form-control" min="0" max="365" step="1" required><small>Set 0 to disable return requests. Use the period stated in your approved return policy.</small></label>
+                </div>
+                <button class="btn btn-primary" type="submit">Save store settings</button>
+              </form>
+            </section>
+            <section class="admin-card">
+              <div class="admin-card-title"><span class="admin-card-icon">₣</span><div><h3>Manual invoice payment methods</h3><p>Customers see these instructions after ordering. Confirm incoming payments manually.</p></div></div>
+              <div id="adminPaymentMethods" class="admin-payment-method-list" aria-live="polite"></div>
+              <form id="createPaymentMethod" class="admin-form" style="margin-top:1.2rem">
+                <h3>Add payment method</h3>
+                <label>Customer-facing label<input name="label" class="form-control" placeholder="Mobile Money" required maxlength="100"></label>
+                <label>Type<select name="type" class="form-control" required><option value="MOBILE_MONEY">Mobile money</option><option value="BANK_TRANSFER">Bank transfer</option><option value="OTHER">Other manual method</option></select></label>
+                <div class="form-two">
+                  <label>Account name<input name="accountName" class="form-control" maxlength="150"></label>
+                  <label>Account / phone number<input name="accountNumber" class="form-control" maxlength="100"></label>
+                </div>
+                <label>Payment instructions<textarea name="instructions" class="form-control" rows="4" required minlength="10" maxlength="2000" placeholder="Explain where to send payment and what reference to include."></textarea></label>
+                <button class="btn btn-primary" type="submit">Add payment method</button>
+              </form>
             </section>
           </div>
         </section>

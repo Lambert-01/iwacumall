@@ -1,80 +1,69 @@
-# IwacuMall — Architecture & API
+# IwacuMall architecture and API
 
-## Component diagram
+## Components
 
 ```mermaid
 flowchart LR
-  Customer[Web shopper] --> Web[Responsive website]
-  Owner[Store owner / admin] --> Admin[Admin dashboard]
-  Shopper[Android shopper] --> Mobile[Flutter Android app]
-  Web --> API[Node.js HTTP API]
-  Admin --> API
-  Mobile --> API
-  API --> DB[(SQLite persistent database)]
+  Shopper[Web shopper] --> Web[Responsive storefront]
+  Admin[Store administrator] --> Dashboard[Admin dashboard]
+  Mobile[Flutter Android app] --> API[Node.js API]
+  Web --> API
+  Dashboard --> API
+  API --> Mongo[(MongoDB Atlas)]
+  API --> SMTP[Configured SMTP provider]
 ```
 
-**Single source of truth:** catalog/price, order total, stock and status are always computed and persisted in the backend. The clients cannot choose a different total.
+The API is the source of truth for prices, stock, invoices, payment status and order fulfilment. A one-minute background sweep expires overdue unpaid invoices transactionally, restores their reserved stock and writes an audit event. Browser authentication uses HttpOnly/SameSite cookies with a CSRF token. Native requests send an explicit bearer token; the app stores it with OS secure storage. Administrator APIs require completed authenticator MFA, except the setup/verification endpoints used to enroll or replace an authenticator.
 
-**Technology:** HTML5/CSS3/modern ES modules (website), Flutter/Dart (Android), Node.js 22 built-in HTTP server, built-in `node:sqlite` (persistent database), salted scrypt for passwords, random bearer sessions.
+## MongoDB collections
 
-## Data model
+- `users`: account profile, scrypt password hash, email verification/reset state, role and MFA flag.
+- `sessions`: hashed opaque session token and expiry.
+- `categories`, `products`: catalogue and integer RWF prices/stock.
+- `orders`: customer/order snapshot, invoice totals, payment method instructions snapshot, payment state and fulfilment state.
+- `paymentMethods`: owner-configured manual payment instructions.
+- `storeSettings`: singleton for public store contact details, delivery fee, tax rate and invoice deadline.
+- `auditLog`: administrative payment, cancellation, fulfilment and settings events.
+- `adminTotpSecrets`: encrypted TOTP secrets and pending setup state.
 
-```text
-users(id, name, email, password_hash, role, created_at)
-sessions(token_hash, user_id, expires_at)
-categories(id, name, slug)
-products(id, name, slug, description, price, stock, category_id,
-         image_url, featured, active, created_at, updated_at)
-orders(id, user_id, customer_name, phone, address, city, note,
-       subtotal, delivery_fee, total, payment_method, status, created_at)
-order_items(id, order_id, product_id, product_name, unit_price, quantity)
-```
-
-All money is stored as **whole Rwandan francs (integers)**. The shipped version accepts `CASH_ON_DELIVERY` only; no fake checkout gateway is present.
+Order stock reservation, payment-state changes and their audit records use Mongo transactions. Configure Atlas or a MongoDB replica set; standalone MongoDB does not support these transactions.
 
 ## API reference (prefix `/api`)
 
-| HTTP | Endpoint | Access | Purpose |
+| Method | Endpoint | Access | Purpose |
 |---|---|---|---|
-| GET | `/health` | Public | Health check |
-| GET | `/config` | Public | Store configuration and payment policy |
-| GET | `/categories` | Public | Browse categories |
-| GET | `/products?search=&category=&featured=1` | Public | Catalog filtering |
-| GET | `/products/:id` | Public | Product details |
-| POST | `/auth/register` | Public | Customer signup |
-| POST | `/auth/login` | Public | Sign in and get token |
-| POST | `/auth/logout` | Signed in | Revoke token |
-| GET | `/me` | Signed in | Profile |
-| GET | `/me/orders` | Signed in | Personal order history |
-| POST | `/orders` | Signed in | Create order and subtract inventory atomically |
-| GET | `/orders/:id` | Owner/Admin | View order details |
-| GET | `/admin/stats` | Admin | KPI counts and delivered-order value |
-| GET | `/admin/orders` | Admin | List orders |
-| PATCH | `/admin/orders/:id/status` | Admin | Change state / restore inventory on cancellation |
-| GET | `/admin/products` | Admin | All products, including hidden |
-| POST | `/admin/products` | Admin | Add product |
-| PATCH | `/admin/products/:id` | Admin | Change stock / details |
-| DELETE | `/admin/products/:id` | Admin | Soft-hide product |
-| POST | `/admin/categories` | Admin | Add a category |
+| GET | `/health` | Public | API and database readiness |
+| GET | `/config` | Public | Store contact, checkout settings and enabled payment methods |
+| GET | `/categories`, `/products` | Public | Catalogue browsing |
+| POST | `/auth/register`, `/auth/login` | Public | Create account or sign in |
+| POST | `/auth/forgot-password`, `/auth/reset-password` | Public | Password recovery |
+| GET | `/auth/verify-email` | Email token | Verify an email address |
+| POST | `/auth/resend-verification` | Signed in | Resend verification message |
+| POST | `/auth/logout` | Signed in | Revoke current session |
+| GET | `/me`, `/me/orders` | Signed in | Account and order history |
+| POST | `/orders` | Signed in | Create invoice and reserve stock |
+| GET | `/orders/:id` | Owner or admin | Read order/invoice details |
+| POST | `/admin/mfa/setup`, `/admin/mfa/verify` | Admin session | Enroll administrator authenticator MFA |
+| GET/PATCH | `/admin/settings` | MFA admin | Read/update store settings |
+| GET/POST/PATCH/DELETE | `/admin/payment-methods` | MFA admin | Manage manual payment instructions |
+| GET/PATCH/POST/DELETE | `/admin/products` | MFA admin | Manage catalogue and inventory |
+| POST | `/admin/categories` | MFA admin | Add catalogue category |
+| GET/POST/PATCH | `/admin/orders` | MFA admin | List orders, confirm payment, record refunds, update fulfilment |
 
-Authentication: `Authorization: Bearer <token>`.
+All order prices and totals are recalculated by the server. `POST /orders` requires `paymentMethodId`, customer contact/address fields and `{ productId, quantity }` lines. Payment instructions are snapshotted into the invoice so later method edits do not alter existing invoices.
 
-Example request:
+## Order flow
 
-```http
-POST /api/orders HTTP/1.1
-Authorization: Bearer <token>
-Content-Type: application/json
-
-{
-  "customerName": "Example Customer",
-  "phone": "0788000000",
-  "city": "Kigali",
-  "address": "Kicukiro, landmark near the market",
-  "items": [{ "productId": "UUID_FROM_CATALOG", "quantity": 2 }]
-}
+```text
+PLACED → CONFIRMED → PACKING → OUT_FOR_DELIVERY → DELIVERED
+   └─────────────── CANCELLED
 ```
 
-**Order status graph:** `PLACED → CONFIRMED → PACKING → OUT_FOR_DELIVERY → DELIVERED`, with cancellation possible from any pre-delivery stage. Cancellation restores stock. Delivered/cancelled orders cannot be altered through the API.
+An administrator confirms manual payment before fulfilment can advance. Cancellation restores reserved stock exactly once. Expired unpaid orders are voided by the server’s expiry process.
 
-**Design trade-off:** This first delivery favors an easily runnable, zero-`npm install` Node web backend on a single server. For larger commerce operations, review migration to managed PostgreSQL with migrations, observability, background jobs, backups, and an appropriate order/payment event model.
+## Operational notes
+
+- Store fees, tax and invoice deadline are saved in MongoDB through the dashboard; environment values seed the initial defaults.
+- Authentication throttling uses HMACed fixed-window counters in MongoDB with TTL cleanup, so API instances share limits without storing raw client IPs.
+- TOTP secrets are encrypted using `COOKIE_SECRET`; rotating that secret makes existing stored authenticator secrets unreadable. Plan MFA recovery before rotation.
+- The SQLite migration is optional for existing legacy data and requires a dry-run, verified backup and review before a write.

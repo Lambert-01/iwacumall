@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#1455D9">
+  <meta name="description" content="IwacuMall – your invoice and payment instructions.">
+  <title>IwacuMall | Your invoice</title>
+  <link rel="icon" href="/assets/favicon.png">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/invoice.js"></script>
+  <style>
+    @media print {
+      .no-print { display: none !important; }
+      body { background: white; }
+    }
+    .invoice-wrapper { max-width: 760px; margin: 0 auto; padding: 2rem 1rem; }
+    .invoice-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 1.5rem; }
+    .invoice-brand img { width: 40px; height: 40px; }
+    .invoice-brand strong { font-size: 1.5rem; }
+    .invoice-box { background: white; border-radius: 16px; box-shadow: 0 4px 24px rgba(8,31,98,.08); padding: 2rem; margin-bottom: 1.5rem; }
+    .invoice-title { font-size: 2rem; font-weight: 900; color: #081F62; margin-bottom: .3rem; }
+    .invoice-num { font-size: .9rem; color: #8190aa; margin-bottom: 1rem; }
+    .invoice-row { display: flex; justify-content: space-between; padding: .4rem 0; border-bottom: 1px solid #f0f2f7; }
+    .invoice-row:last-child { border-bottom: none; font-weight: 800; font-size: 1.1rem; color: #1455D9; }
+    .payment-box { background: #f0f5ff; border-radius: 12px; padding: 1.2rem; margin: 1rem 0; }
+    .payment-box h3 { margin: 0 0 .5rem; color: #081F62; }
+    .payment-box pre { white-space: pre-wrap; font-family: inherit; margin: 0; font-size: .95rem; }
+    .deadline-warning { background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; padding: .8rem 1rem; margin-top: 1rem; color: #856404; }
+    .invoice-actions { display: flex; gap: .8rem; flex-wrap: wrap; margin-top: 1.5rem; }
+    .status-pill { display: inline-block; padding: .3rem .8rem; border-radius: 20px; font-size: .82rem; font-weight: 800; letter-spacing: .02em; }
+    .status-PENDING  { background: #fff3cd; color: #856404; }
+    .status-PAID     { background: #d1f5e3; color: #155724; }
+    .status-EXPIRED  { background: #f8d7da; color: #721c24; }
+    .status-VOID     { background: #e9ecef; color: #495057; }
+  </style>
+</head>
+<body>
+  <div class="announcement no-print"><span class="announcement-dot"></span> IwacuMall Invoice <span class="announcement-sep">•</span> Keep this for your records <span class="announcement-dot"></span></div>
+  <header class="site-header no-print">
+    <div class="container header-row">
+      <a class="brand" href="/" aria-label="IwacuMall home"><img src="/assets/favicon.png" alt=""><span>Iwacu<span class="brand-accent">Mall</span></span></a>
+      <div class="header-actions" style="margin-left:auto">
+        <a class="btn btn-subtle" href="/orders">← My orders</a>
+        <a class="btn btn-subtle" href="/">Continue shopping</a>
+      </div>
+    </div>
+  </header>
+  <main class="invoice-wrapper">
+    <div id="invoiceLoading" class="empty-state">Loading invoice…</div>
+    <div id="invoiceContent" hidden>
+      <div class="invoice-box">
+        <div class="invoice-brand">
+          <img src="/assets/favicon.png" alt="">
+          <strong><span id="storeName">IwacuMall</span></strong>
+        </div>
+        <div class="invoice-title">Invoice</div>
+        <div class="invoice-num">Invoice No. <strong id="invoiceNumber">—</strong> &nbsp;|&nbsp; <span id="invoiceDate">—</span></div>
+        <div>
+          <span class="status-pill" id="paymentStatusPill">PENDING</span>
+          <span id="fulfillmentStatusText" style="margin-left:.5rem;color:#8190aa;font-size:.88rem;"></span>
+        </div>
+
+        <hr style="margin: 1.2rem 0; border: none; border-top: 1px solid #e8edf6;">
+
+        <table style="width:100%;border-collapse:collapse;margin-bottom:1rem" id="itemsTable">
+          <thead><tr><th style="text-align:left;padding:.4rem 0;border-bottom:2px solid #e8edf6;color:#081F62">Item</th><th style="text-align:right;border-bottom:2px solid #e8edf6;color:#081F62">Qty</th><th style="text-align:right;border-bottom:2px solid #e8edf6;color:#081F62">Unit</th><th style="text-align:right;border-bottom:2px solid #e8edf6;color:#081F62">Amount</th></tr></thead>
+          <tbody id="itemsBody"></tbody>
+        </table>
+
+        <div id="totalsSection">
+          <div class="invoice-row"><span>Subtotal</span><span id="subtotalCell">—</span></div>
+          <div class="invoice-row" id="deliveryRow"><span>Delivery fee</span><span id="deliveryCell">—</span></div>
+          <div class="invoice-row" id="taxRow"><span>Tax</span><span id="taxCell">—</span></div>
+          <div class="invoice-row"><span>Total due</span><span id="totalCell">—</span></div>
+          <div class="invoice-row" id="refundRow" hidden><span>Refunded to date</span><span id="refundCell">—</span></div>
+          <div class="invoice-row" id="netAfterRefundRow" hidden><span>Net after refunds</span><span id="netAfterRefundCell">—</span></div>
+        </div>
+
+        <div class="payment-box" id="paymentBox">
+          <h3>How to pay</h3>
+          <p><strong>Method:</strong> <span id="paymentMethodLabel">—</span></p>
+          <pre id="paymentInstructions">—</pre>
+        </div>
+
+        <div class="deadline-warning" id="deadlineBox" hidden>
+          ⏰ Please complete payment by <strong id="deadlineText">—</strong>. Unpaid orders may be cancelled after this date.
+        </div>
+
+        <p id="paidNotice" hidden style="color:#155724;background:#d1f5e3;border-radius:8px;padding:.8rem;margin-top:1rem;">
+          ✅ Payment confirmed by the store. Thank you!
+        </p>
+      </div>
+
+      <div class="invoice-actions no-print">
+        <a class="btn btn-primary" id="downloadPdfBtn" href="#" target="_blank">📥 Download PDF Invoice</a>
+        <button class="btn btn-subtle" id="printInvoice" type="button">🖨️ Print invoice</button>
+        <a class="btn btn-subtle" href="/orders">View all orders</a>
+      </div>
+
+      <p style="color:#8190aa;font-size:.8rem;margin-top:1rem;">
+        <span id="storeAddress"></span> &nbsp;·&nbsp; <span id="storePhone"></span>
+      </p>
+    </div>
+    <div id="invoiceError" hidden class="empty-state"></div>
+  </main>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

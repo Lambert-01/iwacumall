@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#1455D9">
+  <meta name="description" content="__PRODUCT_DESCRIPTION__">
+  <link rel="canonical" href="__PRODUCT_CANONICAL__">
+  <meta property="og:type" content="product">
+  <meta property="og:title" content="__PRODUCT_NAME__ | IwacuMall">
+  <meta property="og:description" content="__PRODUCT_DESCRIPTION__">
+  <meta property="og:image" content="__PRODUCT_IMAGE__">
+  <script type="application/ld+json">__PRODUCT_SCHEMA__</script>
+  <title>__PRODUCT_NAME__ | IwacuMall</title>
+  <link rel="icon" href="/assets/favicon.png">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/overrides.css">
+  <style>
+    .product-detail-layout {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 40px;
+      margin: 40px auto;
+      max-width: 1040px;
+      padding: 0 20px;
+      align-items: start;
+    }
+    @media (max-width: 768px) {
+      .product-detail-layout { grid-template-columns: 1fr; gap: 24px; margin: 20px auto; }
+    }
+    .product-detail-img-box {
+      background: #fff;
+      border-radius: 20px;
+      padding: 24px;
+      text-align: center;
+      box-shadow: 0 4px 20px rgba(8, 31, 98, 0.06);
+    }
+    .product-detail-img-box img {
+      max-width: 100%;
+      max-height: 400px;
+      object-fit: contain;
+      border-radius: 12px;
+    }
+    .product-detail-info {
+      background: #fff;
+      border-radius: 20px;
+      padding: 32px;
+      box-shadow: 0 4px 20px rgba(8, 31, 98, 0.06);
+    }
+    .product-detail-cat {
+      font-size: 12px;
+      font-weight: 800;
+      color: #1455D9;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      margin-bottom: 8px;
+    }
+    .product-detail-title {
+      font-size: 28px;
+      font-weight: 900;
+      color: #081F62;
+      margin: 0 0 16px;
+      line-height: 1.25;
+    }
+    .product-detail-price {
+      font-size: 26px;
+      font-weight: 900;
+      color: #1455D9;
+      margin-bottom: 20px;
+    }
+    .product-detail-desc {
+      font-size: 15px;
+      color: #4A5568;
+      line-height: 1.6;
+      margin-bottom: 24px;
+      white-space: pre-wrap;
+    }
+    .product-detail-stock {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: 700;
+      margin-bottom: 24px;
+    }
+    .stock-in { background: #E6FFFA; color: #234E52; }
+    .stock-out { background: #FFF5F5; color: #9B2C2C; }
+    .product-qty-row {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .qty-btn {
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      border: 1px solid #CBD5E0;
+      background: #fff;
+      font-size: 18px;
+      font-weight: bold;
+      cursor: pointer;
+    }
+    .qty-display {
+      font-size: 18px;
+      font-weight: 800;
+      min-width: 30px;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <div class="container header-row">
+      <a class="brand" href="/" aria-label="IwacuMall home">
+        <img src="/assets/favicon.png" alt="">
+        <span>Iwacu<span class="brand-accent">Mall</span></span>
+      </a>
+      <div class="header-actions" style="margin-left:auto">
+        <a class="btn btn-subtle" href="/#products">← All products</a>
+        <a class="btn btn-primary" href="/#cart">Shopping cart</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <div id="productLoading" style="display:none;text-align:center;padding:60px 0;color:#718096;">Loading product details…</div>
+    <div id="productContainer" class="product-detail-layout">
+      <div class="product-detail-img-box">
+        <img id="productImage" src="__PRODUCT_IMAGE__" alt="__PRODUCT_NAME__">
+      </div>
+      <div class="product-detail-info">
+        <div id="productCategory" class="product-detail-cat">__PRODUCT_CATEGORY__</div>
+        <h1 id="productTitle" class="product-detail-title">__PRODUCT_NAME__</h1>
+        <div id="productPrice" class="product-detail-price">RWF __PRODUCT_PRICE__</div>
+        <div id="productStockBadge" class="product-detail-stock __PRODUCT_STOCK_CLASS__">__PRODUCT_STOCK__</div>
+        <p id="productDescription" class="product-detail-desc">__PRODUCT_DESCRIPTION__</p>
+
+        <div class="product-qty-row">
+          <label style="font-weight:bold;font-size:14px;color:#081F62;">Quantity:</label>
+          <button class="qty-btn" id="btnMinus">−</button>
+          <span class="qty-display" id="qtyText">1</span>
+          <button class="qty-btn" id="btnPlus">+</button>
+        </div>
+
+        <button class="btn btn-primary full" id="addToCartBtn" style="padding:16px;" disabled>Add to cart →</button>
+      </div>
+    </div>
+    <div id="productError" style="display:none;text-align:center;padding:60px 0;">
+      <h2>Product not found</h2>
+      <p style="color:#718096;margin:12px 0 24px;">The item you are looking for may have been removed or renamed.</p>
+      <a class="btn btn-primary" href="/#products">Browse all products</a>
+    </div>
+  </main>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script type="module" src="/product.js"></script>
+</body>
+</html>
