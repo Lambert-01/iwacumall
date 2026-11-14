@@ -137,7 +137,6 @@ function renderProducts() {
 }
 
 async function loadProductsPage(requestedPage = 1) {
-  if (state.productsLoading) return;
   state.productRequestId++;
   const requestId = state.productRequestId;
   const page = Math.max(1, Math.min(state.totalPages || 1, Number(requestedPage) || 1));
@@ -157,8 +156,7 @@ async function loadProductsPage(requestedPage = 1) {
     renderProducts();
   } catch (error) {
     if (requestId !== state.productRequestId) return;
-    if (!reset) toast(error.message);
-    else throw error;
+    toast(error.message);
   } finally {
     if (requestId === state.productRequestId) {
       state.productsLoading = false;
