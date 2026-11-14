@@ -313,14 +313,28 @@ test('checkout atomically records invoice delivery and PDF endpoint returns a PD
 });
 
 test('outbox sends both copies with the same invoice PDF and records delivery', async () => {
+  const { createTransport } = await import('nodemailer');
   const { setMailerTransportForTests, resetMailerTransportForTests } = await import('../server/mailer.mjs');
   const { processEmailOutboxBatch } = await import('../server/outbox.mjs');
+  const originalSmtpFrom = config.smtpFrom;
+  config.smtpFrom = 'store@test.example';
+  const mimeTransport = createTransport({
+    streamTransport: true,
+    buffer: true,
+    disableFileAccess: true,
+    disableUrlAccess: true,
+  });
   const captured = [];
-  setMailerTransportForTests({ sendMail: async message => { captured.push(message); return { messageId: 'local-test' }; } });
+  setMailerTransportForTests({ sendMail: async message => {
+    const info = await mimeTransport.sendMail(message);
+    captured.push({ ...message, generated: info.message });
+    return info;
+  } });
   try {
     await processEmailOutboxBatch();
   } finally {
     resetMailerTransportForTests();
+    config.smtpFrom = originalSmtpFrom;
   }
   const { emailOutbox } = await import('../server/db/repository.mjs');
   const job = (await emailOutbox.list()).find(item => item.orderId === orderId);
@@ -333,6 +347,9 @@ test('outbox sends both copies with the same invoice PDF and records delivery', 
   assert.deepEqual(messages[0].attachments[0].content, messages[1].attachments[0].content);
   const customerMessage = messages.find(message => message.to === 'buyer@test.example');
   assert.match(customerMessage.html, /cid:iwacumall-logo/);
+  assert.ok(Buffer.isBuffer(customerMessage.attachments[1].content), 'logo attachment should use buffered content with file access disabled');
+  assert.ok(Buffer.isBuffer(customerMessage.generated), 'Nodemailer should build the email MIME stream successfully');
+  assert.ok(customerMessage.generated.includes(Buffer.from('iwacumall-logo.png')));
   assert.match(customerMessage.html, /Customer Care/);
   assert.match(customerMessage.html, /Kicukiro, main road, Kigali, Rwanda/);
   assert.match(customerMessage.html, /Payment reference/);

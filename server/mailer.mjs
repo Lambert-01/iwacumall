@@ -4,11 +4,11 @@
  */
 
 import { createTransport } from 'nodemailer';
-import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
 import config from './config.mjs';
 
 let _transport = null;
-const BRAND_LOGO_PATH = fileURLToPath(new URL('../web/assets/favicon.png', import.meta.url));
+const BRAND_LOGO_BUFFER = readFileSync(new URL('../web/assets/favicon.png', import.meta.url));
 
 export function setMailerTransportForTests(transport) {
   if (!config.isTest) throw new Error('Mailer transport injection is only available in test mode.');
@@ -57,7 +57,12 @@ function brandEmail({ storeName, title, intro, body, store, invoiceUrl = '' }) {
 }
 
 function logoAttachment() {
-  return { filename: 'iwacumall-logo.png', path: BRAND_LOGO_PATH, cid: 'iwacumall-logo' };
+  return {
+    filename: 'iwacumall-logo.png',
+    content: BRAND_LOGO_BUFFER,
+    contentType: 'image/png',
+    cid: 'iwacumall-logo',
+  };
 }
 
 function getTransport() {
@@ -95,8 +100,13 @@ export async function sendMail({ to, subject, text, html, attachments }) {
     });
     return { ok: true };
   } catch (error) {
-    console.error('[mailer] send failed:', error?.code || 'SMTP_ERROR');
-    return { ok: false, error: error?.code || 'SMTP delivery failed' };
+    const code = error?.code || 'SMTP_ERROR';
+    let detail = String(error?.message || 'SMTP delivery failed').replace(/[\r\n]+/g, ' ').slice(0, 220);
+    for (const secret of [config.smtpPass, config.smtpUser]) {
+      if (secret) detail = detail.split(secret).join('[redacted]');
+    }
+    console.error(`[mailer] send failed: ${code} ${detail}`);
+    return { ok: false, error: `${code}: ${detail}`.slice(0, 300) };
   }
 }
 
