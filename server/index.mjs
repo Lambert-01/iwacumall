@@ -788,13 +788,14 @@ async function api(req, res, url) {
 
     const b = await bodyJson(req);
     const customerName = cleanText(b.customerName || user.name, 100);
+    const customerEmail = cleanText(b.customerEmail || user.email, 254).toLowerCase();
     const phone   = cleanText(b.phone,   30);
     const address = cleanText(b.address, 180);
     const city    = cleanText(b.city,    90);
     const note    = cleanText(b.note || '', 500);
 
-    ensure(customerName.length >= 2 && phone.length >= 8 && phone.length <= 20 && address.length >= 5 && city.length >= 2,
-      400, 'Complete your name, phone number, city and delivery address');
+    ensure(customerName.length >= 2 && validEmail(customerEmail) && phone.length >= 8 && phone.length <= 20 && address.length >= 5 && city.length >= 2,
+      400, 'Enter a valid email and complete your name, phone number, city and delivery address');
 
     // Payment method
     const selectedMethodId = cleanText(b.paymentMethodId || '', 60);
@@ -829,7 +830,7 @@ async function api(req, res, url) {
     ensure(/^[A-Za-z0-9._:-]{12,128}$/.test(idempotencyKey), 400, 'A valid Idempotency-Key header is required');
     const requestFingerprint = createHash('sha256')
       .update(JSON.stringify({
-        customerName, phone, address, city, note,
+        customerName, customerEmail, phone, address, city, note,
         selectedMethodId,
         items: Array.from(merged.values()).sort((a,b) => `${a.productId}:${a.variantId}`.localeCompare(`${b.productId}:${b.variantId}`))
       }))
@@ -887,7 +888,7 @@ async function api(req, res, url) {
       taxAmount,
       returnWindowDays: Number(settings.returnWindowDays),
       paymentDeadline: deadline,
-      customerEmail: user.email,
+      customerEmail,
       storeNotificationEmail: config.storeNotificationEmail,
       sellerSnapshot: {
         name: settings.storeName || config.storeName,

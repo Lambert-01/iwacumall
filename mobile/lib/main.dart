@@ -449,6 +449,7 @@ class ShopState extends ChangeNotifier {
 
   Future<Map<String, dynamic>> placeOrder({
     required String customerName,
+    required String customerEmail,
     required String phone,
     required String city,
     required String address,
@@ -457,6 +458,7 @@ class ShopState extends ChangeNotifier {
   }) async {
     final body = {
       'customerName': customerName,
+      'customerEmail': customerEmail,
       'phone': phone,
       'city': city,
       'address': address,
@@ -1167,7 +1169,7 @@ class CheckoutPage extends StatefulWidget {
 }
 class _CheckoutPageState extends State<CheckoutPage> {
   final form=GlobalKey<FormState>();
-  final name=TextEditingController(),phone=TextEditingController(),city=TextEditingController(text:'Kigali'),address=TextEditingController(),note=TextEditingController();
+  final name=TextEditingController(),email=TextEditingController(),phone=TextEditingController(),city=TextEditingController(text:'Kigali'),address=TextEditingController(),note=TextEditingController();
   List<Map<String, dynamic>> savedAddresses = [];
   String? selectedSavedAddress;
   bool addressLookupStarted = false;
@@ -1179,6 +1181,7 @@ class _CheckoutPageState extends State<CheckoutPage> {
     super.didChangeDependencies();
     final model = ShopScope.of(context);
     if(name.text.isEmpty)name.text=textOf(model.user?['name']);
+    if(email.text.isEmpty)email.text=textOf(model.user?['email']);
     if(model.signedIn && !addressLookupStarted){
       addressLookupStarted = true;
       unawaited(model.request('/me/addresses').then((result){
@@ -1200,7 +1203,7 @@ class _CheckoutPageState extends State<CheckoutPage> {
     address.text=textOf(item['address']);
   }
   @override
-  void dispose(){name.dispose();phone.dispose();city.dispose();address.dispose();note.dispose();super.dispose();}
+  void dispose(){name.dispose();email.dispose();phone.dispose();city.dispose();address.dispose();note.dispose();super.dispose();}
   @override
   Widget build(BuildContext context) {
     final model = ShopScope.of(context);
@@ -1231,6 +1234,7 @@ class _CheckoutPageState extends State<CheckoutPage> {
             const SizedBox(height:15),
             _CheckoutPanel(title:'Delivery details',subtitle:'Where should we bring your order?',icon:Icons.location_on_outlined,child:Column(children:[
               TextFormField(controller:name,decoration:const InputDecoration(labelText:'Full name'),validator:(v)=>(v??'').trim().length>=2?null:'Please enter your name'),
+              const SizedBox(height:11),TextFormField(controller:email,keyboardType:TextInputType.emailAddress,autofillHints:const [AutofillHints.email],decoration:const InputDecoration(labelText:'Email for invoice and order updates'),validator:(v){final value=(v??'').trim();return RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(value)?null:'Enter a valid email address';}),
               if(savedAddresses.isNotEmpty) ...[
                 const SizedBox(height:11),
                 DropdownButtonFormField<String>(value:selectedSavedAddress,decoration:const InputDecoration(labelText:'Use a saved delivery address'),items:savedAddresses.map((item)=>DropdownMenuItem<String>(value:textOf(item['id']),child:Text('${textOf(item['label'])} · ${textOf(item['city'])}',overflow:TextOverflow.ellipsis))).toList(),onChanged:(value){if(value!=null)selectAddress(value);}),
@@ -1260,11 +1264,11 @@ class _CheckoutPageState extends State<CheckoutPage> {
     if(!form.currentState!.validate())return;
     final model=ShopScope.of(context);
     if(model.cartIssues.isNotEmpty){setState(()=>error='Please update your cart to remove unavailable items or quantities.');return;}
-    if(!model.signedIn){final result=await Navigator.push<bool>(context,MaterialPageRoute(builder:(_)=>const LoginPage()));if(result!=true||!mounted)return;}
+    if(!model.signedIn){final result=await Navigator.push<bool>(context,MaterialPageRoute(builder:(_)=>const LoginPage()));if(result!=true||!mounted)return;if(email.text.trim().isEmpty)email.text=textOf(model.user?['email']);if(name.text.trim().isEmpty)name.text=textOf(model.user?['name']);}
     setState(()=>busy=true);
     try {
       final order = await model.placeOrder(
-        customerName:name.text, phone:phone.text, city:city.text,
+        customerName:name.text, customerEmail:email.text.trim(), phone:phone.text, city:city.text,
         address:address.text, note:note.text, paymentMethodId:paymentMethodId!,
       );
       if(!mounted)return;

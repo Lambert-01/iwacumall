@@ -83,19 +83,35 @@ Do not run `npm run admin:seed` for a routine deployment. It can reset the confi
 
 ## 5. Restart and verify
 
-Restart only the IwacuMall service after pulling code or editing its environment:
+Restart only the IwacuMall service after pulling code or editing its environment. The app connects to MongoDB and completes startup work before opening port 4000, so a short fixed sleep can still get `connection refused`. Poll the health endpoint in an `if` condition instead. This also prevents a temporary failed `curl` from closing an interactive SSH shell when `errexit` is enabled.
 
 ```bash
 sudo systemctl restart iwacumall
-sleep 3
-sudo systemctl status iwacumall --no-pager -l
-curl -fsS http://127.0.0.1:4000/api/health
-curl -fsS https://iwacumall.com/api/health
-curl -fsSI https://iwacumall.com
-curl -fsSI https://admin.iwacumall.com/admin
+ready=0
+for attempt in $(seq 1 20); do
+  if curl -fsS http://127.0.0.1:4000/api/health 2>/dev/null; then
+    ready=1
+    break
+  fi
+  sleep 2
+done
+
+if [ "$ready" -eq 1 ]; then
+  printf '\nLocal API health check passed.\n'
+  curl -fsS https://iwacumall.com/api/health
+  printf '\n'
+  curl -fsSI https://iwacumall.com
+  curl -fsSI https://admin.iwacumall.com/admin
+else
+  printf 'IwacuMall did not open port 4000 within 40 seconds. Recent service logs:\n'
+  sudo systemctl status iwacumall --no-pager -l
+  sudo journalctl -u iwacumall -n 80 --no-pager -o cat
+fi
 ```
 
-The health response should report `"ok":true` and `"database":"connected"`. The admin page should return HTTP 200. To inspect a failed start:
+The health response should report `"ok":true` and `"database":"connected"`. The admin page should return HTTP 200. For an interactive SSH session, do not paste `set -e` or `set -eu` before running the update commands: Bash will close that shell after any unexpected failing command. Conditional checks above allow the session to remain open and print useful service logs if startup fails.
+
+To inspect a failed start separately:
 
 ```bash
 sudo journalctl -u iwacumall -n 80 --no-pager -o cat
