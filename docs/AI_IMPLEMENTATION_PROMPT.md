@@ -104,7 +104,7 @@ Inspect these files and update the ones affected by the requirements. Use their 
 | Recovery and policies | `web/reset-password.html`, `web/reset-password.js`, `web/privacy.html`, `web/terms.html`, `web/delivery-policy.html`, `web/policy.js` |
 | Flutter | `mobile/lib/main.dart`, `mobile/pubspec.yaml`, `mobile/analysis_options.yaml`, `mobile/assets/logo.png` |
 | Tests and migrations | `tests/api.test.mjs`, `scripts/migrate-sqlite-to-mongo.mjs` |
-| Handoff documentation | `README.md`, `docs/ARCHITECTURE.md`, `docs/DEPLOYMENT.md`, `docs/ACCEPTANCE.md` |
+| Handoff documentation | `README.md`, `docs/ARCHITECTURE.md`, `docs/VPS_UPDATE.md`, `docs/ACCEPTANCE.md` |
 
 Inspect references to legacy `server/db.mjs` before changing or removing it. Preserve migration/import behavior and existing data compatibility. Keep demonstration seeding confined to explicitly configured development/test environments.
 

@@ -12,12 +12,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 
-// Android emulator: http://10.0.2.2:4000
-// Physical device: flutter run --dart-define=IWACUMALL_API_URL=http://YOUR_LAN_IP:4000
-// Production: use HTTPS only.
+// Use the production API by default on phones and release builds. Override this
+// endpoint with IWACUMALL_API_URL when developing against a local server.
 const apiBase = String.fromEnvironment(
   'IWACUMALL_API_URL',
-  defaultValue: 'http://10.0.2.2:4000',
+  defaultValue: 'https://iwacumall.com',
 );
 const blue = Color(0xFF1455D9);
 const navy = Color(0xFF081F62);
@@ -54,6 +53,13 @@ class ShopState extends ChangeNotifier {
   String? token;
   Map<String, dynamic>? user;
   List<Map<String, dynamic>> products = [];
+  int productsTotal = 0;
+  bool productsHasMore = false;
+  bool loadingMoreProducts = false;
+  int productsPage = 1;
+  String catalogCategory = 'all';
+  String catalogSearch = '';
+  int _catalogRequestVersion = 0;
   List<Map<String, dynamic>> categories = [];
   List<Map<String, dynamic>> orders = [];
   bool ordersHasMore = false;
@@ -220,18 +226,25 @@ class ShopState extends ChangeNotifier {
   }
 
   Future<void> refresh() async {
+    final requestVersion = ++_catalogRequestVersion;
     loading = true;
+    loadingMoreProducts = false;
     error = null;
     notifyListeners();
     try {
       final responses = await Future.wait([
-        request('/products'),
+        request(_catalogPath(page: 1)),
         request('/categories'),
         request('/config'),
       ]);
-      products = (responses[0]['products'] as List)
-          .map((e) => Map<String, dynamic>.from(e))
-          .toList();
+      if (requestVersion == _catalogRequestVersion) {
+        products = (responses[0]['products'] as List)
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+        productsTotal = countOf(responses[0]['total']);
+        productsPage = countOf(responses[0]['page']).clamp(1, 1000000).toInt();
+        productsHasMore = productsPage < countOf(responses[0]['totalPages']);
+      }
       categories = (responses[1]['categories'] as List)
           .map((e) => Map<String, dynamic>.from(e))
           .toList();
@@ -240,10 +253,56 @@ class ShopState extends ChangeNotifier {
           .map((e) => Map<String, dynamic>.from(e))
           .toList();
     } catch (e) {
-      error = '$e';
+      if (requestVersion == _catalogRequestVersion) error = '$e';
     } finally {
-      loading = false;
+      if (requestVersion == _catalogRequestVersion) loading = false;
       notifyListeners();
+    }
+  }
+
+  String _catalogPath({required int page}) {
+    final query = <String, String>{'limit': '24', 'page': '$page'};
+    if (catalogCategory != 'all') query['category'] = catalogCategory;
+    if (catalogSearch.trim().isNotEmpty) query['search'] = catalogSearch.trim();
+    return '/products?${Uri(queryParameters: query).query}';
+  }
+
+  Future<void> loadProducts({String? category, String? search, bool append = false}) async {
+    if (category != null) catalogCategory = category;
+    if (search != null) catalogSearch = search;
+    if (append && (!productsHasMore || loadingMoreProducts)) return;
+    final requestVersion = append ? _catalogRequestVersion : ++_catalogRequestVersion;
+    final requestedPage = append ? productsPage + 1 : 1;
+    if (append) {
+      loadingMoreProducts = true;
+    } else {
+      loadingMoreProducts = false;
+      loading = true;
+      error = null;
+      productsHasMore = false;
+    }
+    notifyListeners();
+    try {
+      final data = await request(_catalogPath(page: requestedPage));
+      if (requestVersion != _catalogRequestVersion) return;
+      final pageProducts = (data['products'] as List)
+          .map((item) => Map<String, dynamic>.from(item))
+          .toList();
+      products = append ? [...products, ...pageProducts] : pageProducts;
+      productsTotal = countOf(data['total']);
+      productsPage = countOf(data['page']).clamp(1, 1000000).toInt();
+      productsHasMore = productsPage < countOf(data['totalPages']);
+    } catch (e) {
+      if (requestVersion == _catalogRequestVersion) error = '$e';
+    } finally {
+      if (requestVersion == _catalogRequestVersion) {
+        if (append) {
+          loadingMoreProducts = false;
+        } else {
+          loading = false;
+        }
+        notifyListeners();
+      }
     }
   }
 
@@ -270,9 +329,14 @@ class ShopState extends ChangeNotifier {
   }
 
   Future<String> acquireGoogleIdToken() async {
-    final serverClientId = textOf(storeConfig['googleWebClientId']);
+    var serverClientId = textOf(storeConfig['googleWebClientId']);
     if (serverClientId.isEmpty) {
-      throw Exception('Google sign-in has not been configured for this app yet.');
+      final config = await request('/config');
+      storeConfig = Map<String, dynamic>.from(config);
+      serverClientId = textOf(storeConfig['googleWebClientId']);
+    }
+    if (serverClientId.isEmpty) {
+      throw Exception('Google sign-in has not been configured on the IwacuMall server yet.');
     }
     final google = GoogleSignIn.instance;
     if (!_googleSignInInitialized) {
@@ -568,7 +632,7 @@ class _ShopShellState extends State<ShopShell> {
   @override
   Widget build(BuildContext context) {
     final model = ShopScope.of(context);
-    final pages = [const ShopHome(), const CartPage(), const OrdersPage(), const AccountPage()];
+    final pages = [const ShopHome(), CartPage(onBrowse: () => setState(() => current = 0)), const OrdersPage(), const AccountPage()];
     return Scaffold(
       appBar: AppBar(
         toolbarHeight: 72,
@@ -622,13 +686,23 @@ class ShopHome extends StatefulWidget {
 class _ShopHomeState extends State<ShopHome> {
   String category = 'all';
   String query = '';
+  Timer? _searchDebounce;
+
+  @override
+  void dispose() {
+    _searchDebounce?.cancel();
+    super.dispose();
+  }
+
+  void _selectCategory(ShopState model, String value) {
+    setState(() => category = value);
+    unawaited(model.loadProducts(category: value, search: query));
+  }
+
   @override
   Widget build(BuildContext context) {
     final model = ShopScope.of(context);
-    final products = model.products.where((p) =>
-        (category == 'all' || p['categorySlug'] == category) &&
-        (query.isEmpty || '${p['name']} ${p['description']}'.toLowerCase().contains(query.toLowerCase())))
-        .toList();
+    final products = model.products;
     return RefreshIndicator(
       onRefresh:model.refresh,
       child: CustomScrollView(slivers: [
@@ -658,27 +732,56 @@ class _ShopHomeState extends State<ShopHome> {
           Padding(
             padding:const EdgeInsets.fromLTRB(16,0,16,15),
             child:TextField(
-              onChanged:(value)=>setState(()=>query=value),
-              decoration:const InputDecoration(prefixIcon:Icon(Icons.search),hintText:'Search products...',border:OutlineInputBorder()),
+              onChanged:(value){
+                setState(()=>query=value);
+                _searchDebounce?.cancel();
+                _searchDebounce=Timer(const Duration(milliseconds:350),()=>model.loadProducts(category:category,search:value));
+              },
+              decoration:InputDecoration(
+                prefixIcon:const Icon(Icons.search),
+                hintText:'Search products...',
+                border:const OutlineInputBorder(),
+                suffixIcon:query.isEmpty?null:IconButton(icon:const Icon(Icons.close),onPressed:(){
+                  setState(()=>query='');
+                  _searchDebounce?.cancel();
+                  unawaited(model.loadProducts(category:category,search:''));
+                }),
+              ),
             ),
           ),
           const Padding(padding:EdgeInsets.fromLTRB(16,7,16,10),child:Row(children:[Text('Explore categories',style:TextStyle(fontSize:19,fontWeight:FontWeight.w900,color:navy))])),
           SizedBox(height:45,child:ListView(scrollDirection:Axis.horizontal,padding:const EdgeInsets.symmetric(horizontal:16),children:[
-            _categoryChip('all','All',category=='all',()=>setState(()=>category='all')),
-            ...model.categories.map((c)=>_categoryChip(textOf(c['slug']),textOf(c['name']),category==c['slug'],()=>setState(()=>category=textOf(c['slug'])))),
+            _categoryChip('all','All',category=='all',()=>_selectCategory(model,'all')),
+            ...model.categories.map((c)=>_categoryChip(textOf(c['slug']),textOf(c['name']),category==c['slug'],()=>_selectCategory(model,textOf(c['slug'])))),
           ])),
-          const Padding(padding:EdgeInsets.fromLTRB(16,24,16,14),child:Row(children:[Text('Find something you love',style:TextStyle(fontSize:19,fontWeight:FontWeight.w900,color:navy))])),
+          Padding(padding:const EdgeInsets.fromLTRB(16,24,16,14),child:Row(children:[
+            Expanded(child:Text(query.isEmpty?'Find something you love':'Search results',style:const TextStyle(fontSize:19,fontWeight:FontWeight.w900,color:navy))),
+            if(products.isNotEmpty)Text('${model.productsTotal} products',style:const TextStyle(fontSize:11,color:Colors.blueGrey,fontWeight:FontWeight.w700)),
+          ])),
           if(model.error!=null) Padding(padding:const EdgeInsets.all(16),child:Column(children:[Text(model.error!,style:const TextStyle(color:Colors.red)),TextButton(onPressed:model.refresh,child:const Text('Retry'))])),
           if(model.loading)const LinearProgressIndicator(),
         ])),
         SliverPadding(
           padding:const EdgeInsets.fromLTRB(14,0,14,34),
-          sliver:SliverGrid.builder(
-            itemCount:products.length,
-            gridDelegate:const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount:2,mainAxisSpacing:13,crossAxisSpacing:13,childAspectRatio:.69),
-            itemBuilder:(context,i){final p=products[i];return ProductTile(product:p,onView:()=>showProductQuickView(context,p),onAdd:(){if(productVariantsOf(p).isNotEmpty){showProductQuickView(context,p);return;}model.add(textOf(p['id']));ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('${p['name']} added to cart'),duration:const Duration(seconds:1)));});},
-          ),
+          sliver:products.isEmpty&&!model.loading
+              ? SliverToBoxAdapter(child:Padding(padding:const EdgeInsets.symmetric(vertical:42),child:Column(children:[
+                  const Icon(Icons.search_off_rounded,size:48,color:Color(0xFF9AA9C0)),
+                  const SizedBox(height:12),
+                  Text(query.isEmpty?'No products in this category yet':'No products match “$query”',textAlign:TextAlign.center,style:const TextStyle(color:navy,fontWeight:FontWeight.w800)),
+                  if(query.isNotEmpty)TextButton(onPressed:(){setState(()=>query='');unawaited(model.loadProducts(category:category,search:''));},child:const Text('Clear search')),
+                ])))
+              : SliverGrid.builder(
+                  itemCount:products.length,
+                  gridDelegate:const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount:2,mainAxisSpacing:13,crossAxisSpacing:13,childAspectRatio:.69),
+                  itemBuilder:(context,i){final p=products[i];return ProductTile(product:p,onView:()=>showProductQuickView(context,p),onAdd:(){if(productVariantsOf(p).isNotEmpty){showProductQuickView(context,p);return;}model.add(textOf(p['id']));ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('${p['name']} added to cart'),duration:const Duration(seconds:1)));});},
+                ),
         ),
+        if(model.productsHasMore||model.loadingMoreProducts)
+          SliverToBoxAdapter(child:Padding(padding:const EdgeInsets.fromLTRB(20,0,20,30),child:Center(child:OutlinedButton.icon(
+            onPressed:model.loadingMoreProducts?null:()=>model.loadProducts(append:true),
+            icon:model.loadingMoreProducts?const SizedBox(width:17,height:17,child:CircularProgressIndicator(strokeWidth:2)):const Icon(Icons.expand_more),
+            label:Text(model.loadingMoreProducts?'Loading more products…':'Load more products'),
+          )))),
       ]),
     );
   }
@@ -696,130 +799,296 @@ class ProductTile extends StatelessWidget {
   final VoidCallback onView;
   @override
   Widget build(BuildContext context) => Container(
-    decoration:BoxDecoration(color:Colors.white,borderRadius:BorderRadius.circular(17),boxShadow:[BoxShadow(color:const Color(0x0E081F62),blurRadius:14,offset:const Offset(0,5))]),
-    clipBehavior:Clip.antiAlias,
-    child:Material(color:Colors.transparent,child:InkWell(onTap:onView,child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-      Expanded(child:Stack(fit:StackFit.expand,children:[productImage(textOf(product['imageUrl'])),if(product['isSecondHand']==true)Positioned(left:8,bottom:8,child:DecoratedBox(decoration:BoxDecoration(color:const Color(0xFFFFF8E8),border:Border.all(color:const Color(0xFFEFD9AA)),borderRadius:BorderRadius.circular(99)),child:const Padding(padding:EdgeInsets.symmetric(horizontal:9,vertical:6),child:Text('PRE-OWNED',style:TextStyle(fontSize:8,fontWeight:FontWeight.w900,color:Color(0xFF82561A)))))),Positioned(right:8,top:8,child:DecoratedBox(decoration:BoxDecoration(color:Colors.white.withOpacity(.92),borderRadius:BorderRadius.circular(99)),child:const Padding(padding:EdgeInsets.symmetric(horizontal:9,vertical:6),child:Text('Quick view  ↗',style:TextStyle(fontSize:9,fontWeight:FontWeight.w800,color:blue))))])),
-      Padding(padding:const EdgeInsets.all(11),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-        Text(textOf(product['category']).toUpperCase(),style:const TextStyle(fontSize:9,letterSpacing:.7,color:Colors.blueGrey,fontWeight:FontWeight.w800)),
-        const SizedBox(height:5),
-        Text(textOf(product['name']),maxLines:1,overflow:TextOverflow.ellipsis,style:const TextStyle(fontWeight:FontWeight.w900,fontSize:14,color:navy)),
-        const SizedBox(height:8),
-        Row(children:[Expanded(child:Text('${productVariantsOf(product).isNotEmpty?'From ':''}${money(product['price'])}',maxLines:1,style:const TextStyle(color:blue,fontWeight:FontWeight.w900,fontSize:13))),
-          SizedBox(width:33,height:33,child:IconButton.filledTonal(icon:const Icon(Icons.add,size:20),padding:EdgeInsets.zero,onPressed:product['active']==false||(product['trackInventory']==true&&countOf(product['stock'])<=0)?null:onAdd)),
-        ]),
-      ])),
-    ]))),
-  );
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(17),
+          boxShadow: [BoxShadow(color: const Color(0x0E081F62), blurRadius: 14, offset: const Offset(0, 5))],
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: onView,
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Expanded(
+                child: Stack(fit: StackFit.expand, children: [
+                  productImage(textOf(product['imageUrl'])),
+                  if (product['isSecondHand'] == true)
+                    Positioned(
+                      left: 8,
+                      bottom: 8,
+                      child: _quickViewBadge('PRE-OWNED', const Color(0xFFFFF8E8), const Color(0xFF82561A)),
+                    ),
+                  Positioned(
+                    right: 8,
+                    top: 8,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(color: Colors.white.withOpacity(.92), borderRadius: BorderRadius.circular(99)),
+                      child: const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+                        child: Text('Quick view  ↗', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: blue)),
+                      ),
+                    ),
+                  ),
+                ]),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(11),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(textOf(product['category']).toUpperCase(), style: const TextStyle(fontSize: 9, letterSpacing: .7, color: Colors.blueGrey, fontWeight: FontWeight.w800)),
+                  const SizedBox(height: 5),
+                  Text(textOf(product['name']), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 14, color: navy)),
+                  const SizedBox(height: 8),
+                  Row(children: [
+                    Expanded(child: Text('${productVariantsOf(product).isNotEmpty ? 'From ' : ''}${money(product['price'])}', maxLines: 1, style: const TextStyle(color: blue, fontWeight: FontWeight.w900, fontSize: 13))),
+                    SizedBox(
+                      width: 33,
+                      height: 33,
+                      child: IconButton.filledTonal(
+                        icon: const Icon(Icons.add, size: 20),
+                        padding: EdgeInsets.zero,
+                        onPressed: product['active'] == false || (product['trackInventory'] == true && countOf(product['stock']) <= 0) ? null : onAdd,
+                      ),
+                    ),
+                  ]),
+                ]),
+              ),
+            ]),
+          ),
+        ),
+      );
 }
 
-Future<void> showProductQuickView(BuildContext context, Map<String,dynamic> product) {
-  final pageContext=context;
-  final model=ShopScope.of(context);
-  final images=productImageGallery(product);
-  final categorySlug=textOf(product['categorySlug']);
-  final relatedProducts=model.products.where((item)=>textOf(item['id'])!=textOf(product['id'])&&
-    item['active']!=false&&categorySlug.isNotEmpty&&textOf(item['categorySlug'])==categorySlug).take(6).toList();
-  final stock=countOf(product['stock']);
-  final variants=productVariantsOf(product);
-  var selectedVariantId='';
-  Map<String,dynamic>? selectedVariant()=>variants.where((option)=>option['id']==selectedVariantId).firstOrNull;
-  int selectedPrice()=>countOf(selectedVariant()?['price']??product['price']);
-  final tracksInventory=product['trackInventory']==true;
-  final limit=tracksInventory?stock.clamp(0,100).toInt():100;
-  final productAvailable=product['active']!=false&&(!tracksInventory||stock>0);
-  final addable=(limit-model.quantityForProduct(textOf(product['id']))).clamp(0,limit).toInt();
-  var quantity=addable>0?1:0;
-  var selectedImageIndex=0;
-  void addSelectedVariant(BuildContext sheetContext) {
-    final option=selectedVariant();
-    model.add(textOf(product['id']),quantity,selectedVariantId);
-    final messenger=ScaffoldMessenger.of(sheetContext);
-    Navigator.pop(sheetContext);
-    final optionLabel=option==null?'':' · ${textOf(option['type'])}: ${textOf(option['value'])}';
-    messenger.showSnackBar(SnackBar(content:Text('$quantity × ${textOf(product['name'])}$optionLabel added to cart'),duration:const Duration(seconds:2)));
+Future<void> showProductQuickView(BuildContext context, Map<String,dynamic> product) =>
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _ProductQuickViewSheet(initialProduct: product, pageContext: context),
+    );
+
+class _ProductQuickViewSheet extends StatefulWidget {
+  const _ProductQuickViewSheet({required this.initialProduct, required this.pageContext});
+  final Map<String, dynamic> initialProduct;
+  final BuildContext pageContext;
+
+  @override
+  State<_ProductQuickViewSheet> createState() => _ProductQuickViewSheetState();
+}
+
+class _ProductQuickViewSheetState extends State<_ProductQuickViewSheet> {
+  late Map<String, dynamic> product;
+  String selectedVariantId = '';
+  int selectedImageIndex = 0;
+  int quantity = 1;
+  bool loadingDetails = true;
+
+  @override
+  void initState() {
+    super.initState();
+    product = Map<String, dynamic>.from(widget.initialProduct);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_loadLatestProduct());
+    });
   }
-  return showModalBottomSheet<void>(
-    context:context,
-    isScrollControlled:true,
-    useSafeArea:true,
-    backgroundColor:Colors.transparent,
-    builder:(sheetContext)=>StatefulBuilder(builder:(context,setSheetState)=>Container(
-      constraints:BoxConstraints(maxHeight:MediaQuery.sizeOf(context).height*.9),
-      decoration:const BoxDecoration(color:Colors.white,borderRadius:BorderRadius.vertical(top:Radius.circular(26))),
-      child:SingleChildScrollView(child:Padding(padding:const EdgeInsets.fromLTRB(20,12,20,22),child:Column(crossAxisSize:CrossAxisSize.stretch,children:[
-        Center(child:Container(width:43,height:4,decoration:BoxDecoration(color:const Color(0xFFDCE3EE),borderRadius:BorderRadius.circular(9)))),
-        const SizedBox(height:15),
-        ClipRRect(borderRadius:BorderRadius.circular(19),child:Container(color:const Color(0xFFF0F4FC),padding:const EdgeInsets.all(12),child:Column(children:[
-          SizedBox(height:images.length>1?205:235,width:double.infinity,child:productImage(images.isEmpty?'':images[selectedImageIndex],fit:BoxFit.contain)),
-          if(images.length>1) ...[
-            const SizedBox(height:9),
-            SizedBox(height:58,child:ListView.separated(scrollDirection:Axis.horizontal,itemCount:images.length,separatorBuilder:(_,__)=>const SizedBox(width:8),itemBuilder:(context,index){
-              final selected=index==selectedImageIndex;
-              return Semantics(button:true,selected:selected,label:'View photo ${index+1} of ${images.length}',child:InkWell(borderRadius:BorderRadius.circular(10),onTap:()=>setSheetState(()=>selectedImageIndex=index),child:Container(width:58,padding:const EdgeInsets.all(3),decoration:BoxDecoration(color:Colors.white,borderRadius:BorderRadius.circular(10),border:Border.all(color:selected?blue:const Color(0xFFE0E7F2),width:selected?2:1)),child:ClipRRect(borderRadius:BorderRadius.circular(7),child:productImage(images[index],fit:BoxFit.contain)))));
+
+  Future<void> _loadLatestProduct() async {
+    final id = textOf(product['id']);
+    if (id.isEmpty) {
+      if (mounted) setState(() => loadingDetails = false);
+      return;
+    }
+    try {
+      final response = await ShopScope.of(context).request('/products/${Uri.encodeComponent(id)}');
+      if (mounted && response['product'] is Map) {
+        setState(() => product = Map<String, dynamic>.from(response['product']));
+      }
+    } catch (_) {
+      // Keep the live catalog card visible if detail refresh is temporarily unavailable.
+    } finally {
+      if (mounted) setState(() => loadingDetails = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final model = ShopScope.of(context);
+    final images = productImageGallery(product);
+    final variants = productVariantsOf(product);
+    final selectedVariant = variants.where((option) => textOf(option['id']) == selectedVariantId).firstOrNull;
+    final price = countOf(selectedVariant?['price'] ?? product['price']);
+    final stock = countOf(product['stock']);
+    final tracksInventory = product['trackInventory'] == true;
+    final productAvailable = product['active'] != false && (!tracksInventory || stock > 0);
+    final limit = tracksInventory ? stock.clamp(0, 100).toInt() : 100;
+    final addable = (limit - model.quantityForProduct(textOf(product['id']))).clamp(0, limit).toInt();
+    final categorySlug = textOf(product['categorySlug']);
+    final relatedProducts = model.products.where((item) =>
+      textOf(item['id']) != textOf(product['id']) && item['active'] != false &&
+      categorySlug.isNotEmpty && textOf(item['categorySlug']) == categorySlug).take(6).toList();
+    if (quantity > addable && addable > 0) quantity = addable;
+    if (addable == 0) quantity = 0;
+
+    return Container(
+      height: MediaQuery.sizeOf(context).height * .91,
+      decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+      child: Column(children: [
+        Padding(padding: const EdgeInsets.only(top: 11, bottom: 4), child: Container(width: 42, height: 4, decoration: BoxDecoration(color: const Color(0xFFDCE3EE), borderRadius: BorderRadius.circular(9)))),
+        Expanded(child: SingleChildScrollView(padding: const EdgeInsets.fromLTRB(17, 10, 17, 22), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          ClipRRect(borderRadius: BorderRadius.circular(22), child: Container(
+            height: 280,
+            color: const Color(0xFFF2F5FB),
+            child: Stack(children: [
+              Positioned.fill(child: Padding(padding: const EdgeInsets.all(13), child: productImage(images.isEmpty ? '' : images[selectedImageIndex.clamp(0, images.length - 1).toInt()], fit: BoxFit.contain))),
+              if (product['isSecondHand'] == true) Positioned(left: 13, top: 13, child: _quickViewBadge('PRE-OWNED', const Color(0xFFFFF4D9), const Color(0xFF82561A))),
+              if (loadingDetails) const Positioned(left: 0, right: 0, bottom: 0, child: LinearProgressIndicator(minHeight: 2)),
+              Positioned(right: 10, top: 10, child: Material(color: Colors.white.withOpacity(.94), shape: const CircleBorder(), child: IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.close, color: navy)))),
+              if (images.length > 1) Positioned(left: 0, right: 0, bottom: 11, child: SizedBox(height: 55, child: ListView.separated(
+                padding: const EdgeInsets.symmetric(horizontal: 12), scrollDirection: Axis.horizontal, itemCount: images.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 8),
+                itemBuilder: (context, index) => InkWell(onTap: () => setState(() => selectedImageIndex = index), borderRadius: BorderRadius.circular(11), child: Container(
+                  width: 55, padding: const EdgeInsets.all(3), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(11), border: Border.all(color: selectedImageIndex == index ? blue : const Color(0xFFE1E7F0), width: selectedImageIndex == index ? 2 : 1)),
+                  child: ClipRRect(borderRadius: BorderRadius.circular(8), child: productImage(images[index], fit: BoxFit.contain)),
+                )),
+              ))),
+            ]),
+          )),
+          const SizedBox(height: 17),
+          Text(textOf(product['category']).toUpperCase(), style: const TextStyle(color: blue, fontWeight: FontWeight.w900, fontSize: 10, letterSpacing: 1.2)),
+          const SizedBox(height: 5),
+          Text(textOf(product['name']), style: const TextStyle(color: navy, fontWeight: FontWeight.w900, fontSize: 24, height: 1.12)),
+          const SizedBox(height: 9),
+          Text(variants.isNotEmpty ? 'From ${money(product['price'])}' : money(price), style: const TextStyle(color: blue, fontWeight: FontWeight.w900, fontSize: 21)),
+          const SizedBox(height: 10),
+          Text(textOf(product['description']).isEmpty ? 'A quality everyday find, selected for you.' : textOf(product['description']), style: const TextStyle(height: 1.5, color: Color(0xFF52627B))),
+          if (variants.isNotEmpty) ...[
+            const SizedBox(height: 19),
+            Row(children: [const Expanded(child: Text('Choose your option', style: TextStyle(color: navy, fontWeight: FontWeight.w900, fontSize: 15))), Text('${variants.length} options', style: const TextStyle(color: Colors.blueGrey, fontSize: 11, fontWeight: FontWeight.w700))]),
+            const SizedBox(height: 9),
+            Wrap(spacing: 8, runSpacing: 8, children: variants.map((option) {
+              final id = textOf(option['id']);
+              final chosen = id == selectedVariantId;
+              return ChoiceChip(
+                label: Text('${textOf(option['type'])}: ${textOf(option['value'])}  ·  ${money(option['price'])}'),
+                selected: chosen,
+                onSelected: (value) => setState(() => selectedVariantId = value ? id : ''),
+                selectedColor: const Color(0xFFEAF1FF),
+                side: BorderSide(color: chosen ? blue : const Color(0xFFE2E8F2)),
+                labelStyle: TextStyle(color: chosen ? blue : navy, fontSize: 11, fontWeight: FontWeight.w800),
+              );
+            }).toList()),
+          ],
+          const SizedBox(height: 16),
+          Container(padding: const EdgeInsets.all(13), decoration: BoxDecoration(color: const Color(0xFFF6F8FC), borderRadius: BorderRadius.circular(15)), child: Row(children: [
+            Icon(productAvailable ? Icons.verified_rounded : Icons.remove_shopping_cart, color: productAvailable ? const Color(0xFF188653) : Colors.red, size: 20),
+            const SizedBox(width: 9),
+            Expanded(child: Text(!productAvailable ? 'Currently unavailable' : tracksInventory ? (stock < 6 ? 'Only $stock left' : 'Available now') : 'Available now', style: TextStyle(fontWeight: FontWeight.w800, color: productAvailable ? const Color(0xFF188653) : Colors.red))),
+            if (product['isSecondHand'] == true) _quickViewBadge('PRE-OWNED', const Color(0xFFFFF4D9), const Color(0xFF82561A)),
+          ])),
+          if (relatedProducts.isNotEmpty) ...[
+            const SizedBox(height: 22),
+            const Text('You may also like', style: TextStyle(color: navy, fontWeight: FontWeight.w900, fontSize: 16)),
+            const SizedBox(height: 10),
+            SizedBox(height: 148, child: ListView.separated(scrollDirection: Axis.horizontal, itemCount: relatedProducts.length, separatorBuilder: (_, __) => const SizedBox(width: 10), itemBuilder: (context, index) {
+              final related = relatedProducts[index];
+              return SizedBox(
+                width: 118,
+                child: Material(
+                  color: const Color(0xFFF6F8FC),
+                  borderRadius: BorderRadius.circular(14),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(14),
+                    onTap: () {
+                      Navigator.pop(context);
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (widget.pageContext.mounted) unawaited(showProductQuickView(widget.pageContext, related));
+                      });
+                    },
+                    child: Padding(
+                      padding: const EdgeInsets.all(9),
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Expanded(child: Center(child: productImage(textOf(related['imageUrl']), fit: BoxFit.contain))),
+                        Text(textOf(related['name']), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: navy, fontWeight: FontWeight.w800, fontSize: 11)),
+                        const SizedBox(height: 3),
+                        Text(money(related['price']), style: const TextStyle(color: blue, fontWeight: FontWeight.w900, fontSize: 11)),
+                      ]),
+                    ),
+                  ),
+                ),
+              );
             })),
           ],
         ]))),
-        const SizedBox(height:18),
-        Text(textOf(product['category']).toUpperCase(),style:const TextStyle(color:blue,fontWeight:FontWeight.w900,fontSize:10,letterSpacing:1.1)),
-        const SizedBox(height:6),
-        Text(textOf(product['name']),style:const TextStyle(color:navy,fontWeight:FontWeight.w900,fontSize:23)),
-        if(product['isSecondHand']==true)...[const SizedBox(height:8),Align(alignment:Alignment.centerLeft,child:DecoratedBox(decoration:BoxDecoration(color:const Color(0xFFFFF8E8),border:Border.all(color:const Color(0xFFEFD9AA)),borderRadius:BorderRadius.circular(99)),child:const Padding(padding:EdgeInsets.symmetric(horizontal:11,vertical:7),child:Text('PRE-OWNED · PREVIOUSLY OWNED',style:TextStyle(color:Color(0xFF82561A),fontSize:9,fontWeight:FontWeight.w900,letterSpacing:.4)))))],
-        const SizedBox(height:8),
-        Text(money(selectedPrice()),style:const TextStyle(color:blue,fontWeight:FontWeight.w900,fontSize:21)),
-        const SizedBox(height:8),
-        Text(textOf(product['description']).isEmpty?'A quality everyday find, selected for you.':textOf(product['description']),style:const TextStyle(height:1.5,color:Colors.blueGrey)),
-        if(variants.isNotEmpty)...[
-          const SizedBox(height:16),
-          const Align(alignment:Alignment.centerLeft,child:Text('Choose an option',style:TextStyle(color:navy,fontWeight:FontWeight.w900,fontSize:13))),
-          const SizedBox(height:8),
-          Align(alignment:Alignment.centerLeft,child:Wrap(spacing:8,runSpacing:7,children:variants.map((option){final id=textOf(option['id']);final selected=id==selectedVariantId;return ChoiceChip(label:Text('${textOf(option['type'])}: ${textOf(option['value'])} · ${money(option['price'])}'),selected:selected,onSelected:(value){setSheetState(()=>selectedVariantId=value?id:'');},selectedColor:const Color(0xFFEAF1FF),labelStyle:TextStyle(color:selected?blue:navy,fontSize:11,fontWeight:FontWeight.w700));}).toList())),
-          const SizedBox(height:5),
-          const Align(alignment:Alignment.centerLeft,child:Text('Select the exact option you want before adding it to your cart.',style:TextStyle(color:Colors.blueGrey,fontSize:10))),
-        ],
-        const SizedBox(height:12),
-        Row(children:[Icon(productAvailable?Icons.check_circle:Icons.remove_shopping_cart,color:productAvailable?Colors.green:Colors.red,size:18),const SizedBox(width:7),Text(!productAvailable?'Currently unavailable':tracksInventory?(stock<6?'Only $stock left':'In stock and ready to order'):'Available',style:TextStyle(fontWeight:FontWeight.w800,color:productAvailable?Colors.green:Colors.red))]),
-        const SizedBox(height:15),
-        Row(children:[const Text('Quantity',style:TextStyle(fontWeight:FontWeight.w700)),const Spacer(),IconButton(onPressed:quantity>1?()=>setSheetState(()=>quantity--):null,icon:const Icon(Icons.remove_circle_outline)),Text('$quantity',style:const TextStyle(fontWeight:FontWeight.w900)),IconButton(onPressed:quantity<addable?()=>setSheetState(()=>quantity++):null,icon:const Icon(Icons.add_circle_outline)),Text(money(selectedPrice()*quantity),style:const TextStyle(color:navy,fontWeight:FontWeight.w900))]),
-        const SizedBox(height:8),
-        SizedBox(height:49,child:FilledButton(onPressed:productAvailable&&addable>0&&(variants.isEmpty||selectedVariant()!=null)?()=>addSelectedVariant(sheetContext):null,child:Text(variants.isNotEmpty&&selectedVariant()==null?'Choose an option':addable>0?'Add to cart  ·  ${money(selectedPrice()*quantity)}':'Maximum quantity is in your cart'))),
-        if(relatedProducts.isNotEmpty)...[
-          const SizedBox(height:22),
-          const Align(alignment:Alignment.centerLeft,child:Text('You may also like',style:TextStyle(color:navy,fontWeight:FontWeight.w900,fontSize:16))),
-          const SizedBox(height:10),
-          SizedBox(height:150,child:ListView.separated(scrollDirection:Axis.horizontal,itemCount:relatedProducts.length,separatorBuilder:(_,__)=>const SizedBox(width:10),itemBuilder:(context,index){
-            final related=relatedProducts[index];
-            return SizedBox(width:118,child:Material(color:const Color(0xFFF7F9FD),borderRadius:BorderRadius.circular(13),child:InkWell(borderRadius:BorderRadius.circular(13),onTap:(){
-              Navigator.pop(sheetContext);
-              WidgetsBinding.instance.addPostFrameCallback((_){if(pageContext.mounted)unawaited(showProductQuickView(pageContext,related));});
-            },child:Padding(padding:const EdgeInsets.all(9),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-              Expanded(child:Center(child:productImage(textOf(related['imageUrl']),fit:BoxFit.contain))),
-              const SizedBox(height:5),
-              Text(textOf(related['name']),maxLines:1,overflow:TextOverflow.ellipsis,style:const TextStyle(color:navy,fontWeight:FontWeight.w800,fontSize:11)),
-              const SizedBox(height:3),
-              Text(money(related['price']),maxLines:1,style:const TextStyle(color:blue,fontWeight:FontWeight.w900,fontSize:11)),
-            ])))));
-          })),
-        ],
-      ]))),
-    )),
-  );
+        Container(decoration: BoxDecoration(color: Colors.white, boxShadow: [BoxShadow(color: navy.withOpacity(.08), blurRadius: 15, offset: const Offset(0, -4))]), padding: const EdgeInsets.fromLTRB(17, 11, 17, 12), child: SafeArea(top: false, child: Row(children: [
+          Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [const Text('YOUR TOTAL', style: TextStyle(color: Colors.blueGrey, fontSize: 9, letterSpacing: .7, fontWeight: FontWeight.w800)), Text(money(price * quantity), style: const TextStyle(color: navy, fontSize: 17, fontWeight: FontWeight.w900))]),
+          const SizedBox(width: 9),
+          IconButton.filledTonal(onPressed: quantity > 1 ? () => setState(() => quantity--) : null, icon: const Icon(Icons.remove)),
+          Text('$quantity', style: const TextStyle(color: navy, fontWeight: FontWeight.w900)),
+          IconButton.filledTonal(onPressed: quantity < addable ? () => setState(() => quantity++) : null, icon: const Icon(Icons.add)),
+          const SizedBox(width: 4),
+          Expanded(child: FilledButton.icon(
+            onPressed: productAvailable && addable > 0 && (variants.isEmpty || selectedVariant != null) ? () {
+              model.add(textOf(product['id']), quantity, selectedVariantId);
+              final optionLabel = selectedVariant == null ? '' : ' · ${textOf(selectedVariant['type'])}: ${textOf(selectedVariant['value'])}';
+              Navigator.pop(context);
+              ScaffoldMessenger.of(widget.pageContext).showSnackBar(SnackBar(content: Text('$quantity × ${textOf(product['name'])}$optionLabel added to cart'), duration: const Duration(seconds: 2)));
+            } : null,
+            icon: const Icon(Icons.shopping_bag_outlined),
+            label: Text(variants.isNotEmpty && selectedVariant == null ? 'Choose option' : addable == 0 ? 'In cart' : 'Add to cart'),
+          )),
+        ]))),
+      ]),
+    );
+  }
 }
 
+Widget _quickViewBadge(String label, Color background, Color foreground) => DecoratedBox(
+  decoration: BoxDecoration(color: background, borderRadius: BorderRadius.circular(99)),
+  child: Padding(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6), child: Text(label, style: TextStyle(color: foreground, fontSize: 9, fontWeight: FontWeight.w900, letterSpacing: .3))),
+);
+
 class CartPage extends StatelessWidget {
-  const CartPage({super.key});
+  const CartPage({super.key, this.onBrowse});
+  final VoidCallback? onBrowse;
   @override
   Widget build(BuildContext context) {
     final model=ShopScope.of(context);
+    final items=model.cartProducts;
     return Column(children:[
-      Padding(padding:const EdgeInsets.fromLTRB(18,22,18,15),child:Row(children:[Text('Your cart',style:Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight:FontWeight.w900,color:navy)),const Spacer(),Text('${model.cartCount} items')])),
-      if(model.cartIssues.isNotEmpty)Padding(padding:const EdgeInsets.symmetric(horizontal:16),child:Card(color:const Color(0xFFFFF7DA),child:Padding(padding:const EdgeInsets.all(12),child:Row(children:[const Expanded(child:Text('Some saved items are unavailable or need an option selected. Update your cart before checkout.',style:TextStyle(fontSize:12))),TextButton(onPressed:model.reconcileCart,child:const Text('Update cart'))])))),
-      Expanded(child:model.cartProducts.isEmpty?const Center(child:Column(mainAxisSize:MainAxisSize.min,children:[Icon(Icons.shopping_bag_outlined,size:66,color:blue),SizedBox(height:15),Text('Your cart is empty',style:TextStyle(fontWeight:FontWeight.w800,fontSize:18))])):ListView.builder(padding:const EdgeInsets.symmetric(horizontal:16),itemCount:model.cartProducts.length,itemBuilder:(context,index){final p=model.cartProducts[index];final id=textOf(p['_cartKey']);final option=textOf(p['_variantLabel']);return Card(color:Colors.white,margin:const EdgeInsets.only(bottom:12),child:Padding(padding:const EdgeInsets.all(10),child:Row(children:[SizedBox(width:88,height:92,child:ClipRRect(borderRadius:BorderRadius.circular(11),child:productImage(textOf(p['imageUrl'])))),const SizedBox(width:13),Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(textOf(p['name']),style:const TextStyle(fontWeight:FontWeight.w800)),if(p['isSecondHand']==true)Padding(padding:const EdgeInsets.only(top:5),child:DecoratedBox(decoration:BoxDecoration(color:const Color(0xFFFFF8E8),border:Border.all(color:const Color(0xFFEFD9AA)),borderRadius:BorderRadius.circular(99)),child:const Padding(padding:EdgeInsets.symmetric(horizontal:8,vertical:4),child:Text('PRE-OWNED',style:TextStyle(color:Color(0xFF82561A),fontSize:8,fontWeight:FontWeight.w900))))),if(option.isNotEmpty)Padding(padding:const EdgeInsets.only(top:4),child:Text(option,style:const TextStyle(color:Colors.blueGrey,fontSize:11,fontWeight:FontWeight.w700))),const SizedBox(height:8),Text(money(p['_linePrice']),style:const TextStyle(color:blue,fontWeight:FontWeight.w800)),Row(children:[IconButton(icon:const Icon(Icons.remove_circle_outline),onPressed:()=>model.changeQuantity(id,-1)),Text('${model.cart[id]}'),IconButton(icon:const Icon(Icons.add_circle_outline),onPressed:()=>model.changeQuantity(id,1))])]))])));}),
-      ),
-      Container(color:Colors.white,padding:const EdgeInsets.all(18),child:SafeArea(top:false,child:Column(children:[Row(children:[const Text('Subtotal',style:TextStyle(fontWeight:FontWeight.w700)),const Spacer(),Text(money(model.subtotal),style:const TextStyle(fontSize:21,fontWeight:FontWeight.w900,color:blue))]),const SizedBox(height:7),const Text('Delivery charges, if any, are confirmed separately by the store.',style:TextStyle(fontSize:11,color:Colors.blueGrey)),const SizedBox(height:15),SizedBox(width:double.infinity,child:FilledButton(onPressed:model.cartCount==0||model.cartIssues.isNotEmpty?null:()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>const CheckoutPage())),child:const Text('Proceed to checkout  →')))]))),
+      Container(margin:const EdgeInsets.fromLTRB(16,14,16,12),padding:const EdgeInsets.all(18),decoration:BoxDecoration(gradient:const LinearGradient(colors:[navy,blue]),borderRadius:BorderRadius.circular(20)),child:Row(children:[
+        Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('YOUR BAG',style:TextStyle(color:gold,fontWeight:FontWeight.w900,fontSize:10,letterSpacing:1.2)),const SizedBox(height:5),const Text('Your cart',style:TextStyle(color:Colors.white,fontSize:23,fontWeight:FontWeight.w900)),const SizedBox(height:3),Text('${model.cartCount} ${model.cartCount==1?'item':'items'} ready for checkout',style:const TextStyle(color:Color(0xFFDDE9FF),fontSize:12))])),
+        Container(width:48,height:48,decoration:BoxDecoration(color:Colors.white.withOpacity(.14),borderRadius:BorderRadius.circular(15)),child:const Icon(Icons.shopping_bag_outlined,color:gold,size:25)),
+      ])),
+      if(model.cartIssues.isNotEmpty)Padding(padding:const EdgeInsets.fromLTRB(16,0,16,8),child:Container(padding:const EdgeInsets.all(12),decoration:BoxDecoration(color:const Color(0xFFFFF7DA),borderRadius:BorderRadius.circular(14),border:Border.all(color:const Color(0xFFF0D992))),child:Row(children:[const Icon(Icons.info_outline,color:Color(0xFF8A6412)),const SizedBox(width:9),const Expanded(child:Text('Some items are unavailable or need attention before checkout.',style:TextStyle(fontSize:12))),TextButton(onPressed:model.reconcileCart,child:const Text('Update'))]))),
+      Expanded(child:items.isEmpty?Center(child:Padding(padding:const EdgeInsets.all(28),child:Column(mainAxisSize:MainAxisSize.min,children:[
+        Container(width:94,height:94,decoration:const BoxDecoration(color:Color(0xFFEAF1FF),shape:BoxShape.circle),child:const Icon(Icons.shopping_bag_outlined,size:43,color:blue)),
+        const SizedBox(height:17),const Text('Your cart is waiting',style:TextStyle(fontWeight:FontWeight.w900,fontSize:20,color:navy)),
+        const SizedBox(height:7),const Text('Explore the store and add something you love.',textAlign:TextAlign.center,style:TextStyle(color:Colors.blueGrey)),
+        const SizedBox(height:18),FilledButton.icon(onPressed:onBrowse,icon:const Icon(Icons.storefront_outlined),label:const Text('Browse the shop')),
+      ]))):ListView.builder(padding:const EdgeInsets.fromLTRB(16,0,16,14),itemCount:items.length,itemBuilder:(context,index){
+        final p=items[index];final id=textOf(p['_cartKey']);final option=textOf(p['_variantLabel']);
+        return Container(margin:const EdgeInsets.only(bottom:11),padding:const EdgeInsets.all(10),decoration:BoxDecoration(color:Colors.white,borderRadius:BorderRadius.circular(17),border:Border.all(color:const Color(0xFFE8EDF5)),boxShadow:[BoxShadow(color:navy.withOpacity(.035),blurRadius:12,offset:const Offset(0,4))]),child:Row(crossAxisAlignment:CrossAxisAlignment.start,children:[
+          ClipRRect(borderRadius:BorderRadius.circular(13),child:Container(width:91,height:104,color:const Color(0xFFF2F5FB),child:productImage(textOf(p['imageUrl']),fit:BoxFit.contain))),
+          const SizedBox(width:12),Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+            Text(textOf(p['name']),maxLines:2,overflow:TextOverflow.ellipsis,style:const TextStyle(fontWeight:FontWeight.w900,color:navy,fontSize:14)),
+            if(option.isNotEmpty)Padding(padding:const EdgeInsets.only(top:5),child:Text(option,style:const TextStyle(color:Colors.blueGrey,fontSize:11,fontWeight:FontWeight.w700))),
+            if(p['isSecondHand']==true)Padding(padding:const EdgeInsets.only(top:5),child:_quickViewBadge('PRE-OWNED',const Color(0xFFFFF4D9),const Color(0xFF82561A))),
+            const SizedBox(height:7),Text(money(p['_linePrice']),style:const TextStyle(color:blue,fontWeight:FontWeight.w900,fontSize:15)),
+            Row(children:[_cartQuantityButton(Icons.remove,()=>model.changeQuantity(id,-1)),Padding(padding:const EdgeInsets.symmetric(horizontal:9),child:Text('${model.cart[id]}',style:const TextStyle(color:navy,fontWeight:FontWeight.w900))),_cartQuantityButton(Icons.add,()=>model.changeQuantity(id,1)),const Spacer(),IconButton(tooltip:'Remove item',onPressed:()=>model.changeQuantity(id,-model.cart[id]!),icon:const Icon(Icons.delete_outline,color:Colors.blueGrey,size:20))]),
+          ])),
+        ]));
+      })),
+      Container(padding:const EdgeInsets.fromLTRB(18,14,18,13),decoration:BoxDecoration(color:Colors.white,boxShadow:[BoxShadow(color:navy.withOpacity(.07),blurRadius:15,offset:const Offset(0,-4))]),child:SafeArea(top:false,child:Column(children:[
+        Row(children:[const Expanded(child:Text('Subtotal',style:TextStyle(color:navy,fontWeight:FontWeight.w800))),Text(money(model.subtotal),style:const TextStyle(fontSize:20,fontWeight:FontWeight.w900,color:blue))]),
+        const SizedBox(height:4),const Row(children:[Icon(Icons.receipt_long_outlined,size:14,color:Colors.blueGrey),SizedBox(width:6),Expanded(child:Text('Delivery and taxes are confirmed before you place the order.',style:TextStyle(fontSize:10,color:Colors.blueGrey)))]),
+        const SizedBox(height:13),SizedBox(width:double.infinity,child:FilledButton.icon(onPressed:model.cartCount==0||model.cartIssues.isNotEmpty?null:()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>const CheckoutPage())),icon:const Icon(Icons.lock_outline),label:const Text('Secure checkout  →'))),
+      ]))),
     ]);
   }
 }
+
+Widget _cartQuantityButton(IconData icon, VoidCallback onPressed) => SizedBox(width:32,height:32,child:IconButton.filledTonal(onPressed:onPressed,padding:EdgeInsets.zero,visualDensity:VisualDensity.compact,icon:Icon(icon,size:17)));
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -843,10 +1112,13 @@ class _LoginPageState extends State<LoginPage> {
       const SizedBox(height:15),Center(child:Image.asset('assets/logo.png',width:115,height:115)),const SizedBox(height:20),
       Text(register?'Join IwacuMall':'Welcome back',textAlign:TextAlign.center,style:const TextStyle(fontSize:26,fontWeight:FontWeight.w900,color:navy)),
       const SizedBox(height:25),
-      if(textOf(model.storeConfig['googleWebClientId']).isNotEmpty)...[
-        OutlinedButton.icon(onPressed:busy?null:signInWithGoogle,icon:const Text('G',style:TextStyle(color:blue,fontSize:19,fontWeight:FontWeight.w900)),label:Text(busy?'Connecting to Google…':'Continue with Google'),style:OutlinedButton.styleFrom(minimumSize:const Size.fromHeight(48),foregroundColor:navy,side:const BorderSide(color:Color(0xFFDDE4F0)),shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(13)))),
-        const Padding(padding:EdgeInsets.symmetric(vertical:14),child:Row(children:[Expanded(child:Divider()),Padding(padding:EdgeInsets.symmetric(horizontal:12),child:Text('or use your email',style:TextStyle(color:Colors.blueGrey,fontSize:12))),Expanded(child:Divider())])),
-      ],
+      Container(padding:const EdgeInsets.all(17),decoration:BoxDecoration(gradient:const LinearGradient(colors:[navy,blue]),borderRadius:BorderRadius.circular(20)),child:Row(children:[
+        Container(width:47,height:47,decoration:BoxDecoration(color:Colors.white.withOpacity(.14),borderRadius:BorderRadius.circular(14)),child:const Icon(Icons.verified_user_outlined,color:gold)),
+        const SizedBox(width:12),const Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('Shop with confidence',style:TextStyle(color:Colors.white,fontWeight:FontWeight.w900,fontSize:15)),SizedBox(height:4),Text('Your orders and details stay in sync.',style:TextStyle(color:Color(0xFFDDE9FF),fontSize:11))])),
+      ])),
+      const SizedBox(height:19),
+      OutlinedButton.icon(onPressed:busy?null:signInWithGoogle,icon:const Text('G',style:TextStyle(color:blue,fontSize:19,fontWeight:FontWeight.w900)),label:Text(busy?'Connecting to Google…':'Continue with Google'),style:OutlinedButton.styleFrom(minimumSize:const Size.fromHeight(51),foregroundColor:navy,side:const BorderSide(color:Color(0xFFDDE4F0)),shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(14)))),
+      const Padding(padding:EdgeInsets.symmetric(vertical:14),child:Row(children:[Expanded(child:Divider()),Padding(padding:EdgeInsets.symmetric(horizontal:12),child:Text('or use your email',style:TextStyle(color:Colors.blueGrey,fontSize:12))),Expanded(child:Divider())])),
       if(register)...[TextFormField(controller:name,decoration:const InputDecoration(labelText:'Full name'),validator:(v)=>(v??'').trim().length<2?'Please enter your name':null),const SizedBox(height:14)],
       TextFormField(controller:email,keyboardType:TextInputType.emailAddress,decoration:const InputDecoration(labelText:'Email address'),validator:(v)=>(v??'').contains('@')?null:'Enter a valid email'),const SizedBox(height:14),
       TextFormField(controller:password,obscureText:true,decoration:const InputDecoration(labelText:'Password'),validator:(v)=>(v??'').length<(register?10:1)?'Password is too short':null),
@@ -934,6 +1206,7 @@ class _CheckoutPageState extends State<CheckoutPage> {
     final model = ShopScope.of(context);
     final config = model.storeConfig;
     final methods = model.paymentMethods;
+    final checkoutBlockedReason = textOf(config['checkoutBlockedReason']);
     paymentMethodId ??= methods.isNotEmpty ? textOf(methods.first['id']) : null;
     final configuredDelivery = countOf(config['deliveryFeeFlat']);
     final delivery = configuredDelivery < 0 ? 0 : configuredDelivery;
@@ -944,49 +1217,40 @@ class _CheckoutPageState extends State<CheckoutPage> {
     return Scaffold(
       appBar: AppBar(title: const Text('Checkout')),
       body: SingleChildScrollView(
-        padding: const EdgeInsets.all(19),
+        padding: const EdgeInsets.fromLTRB(16,12,16,28),
         child: Form(
           key: form,
           child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-            Text('Order total: ${money(total)}', style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 21, color: navy)),
-            const SizedBox(height: 10),
-            _invoiceSummary('Subtotal', model.subtotal),
-            _invoiceSummary('Delivery', delivery),
-            if (taxRate >= 0) _invoiceSummary('Tax ($taxRate%)', tax),
-            const Divider(height: 22),
-            Text(config['checkoutBlockedReason']?.toString() ?? 'Pay by invoice using the instructions shown after your order.', style: const TextStyle(color: Colors.blueGrey, fontSize: 12)),
-            const SizedBox(height: 20),
-            TextFormField(controller:name,decoration:const InputDecoration(labelText:'Full name'),validator:(v)=>(v??'').trim().length>=2?null:'Please enter your name'),
-            if(savedAddresses.isNotEmpty) ...[
-              const SizedBox(height:13),
-              DropdownButtonFormField<String>(
-                value: selectedSavedAddress,
-                decoration: const InputDecoration(labelText:'Use a saved delivery address'),
-                items: savedAddresses.map((item)=>DropdownMenuItem<String>(value:textOf(item['id']),child:Text('${textOf(item['label'])} · ${textOf(item['city'])}',overflow:TextOverflow.ellipsis))).toList(),
-                onChanged:(value){if(value!=null)selectAddress(value);},
-              ),
-            ],
+            Container(padding:const EdgeInsets.all(17),decoration:BoxDecoration(gradient:const LinearGradient(colors:[navy,blue]),borderRadius:BorderRadius.circular(20)),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+              const Text('ORDER SUMMARY',style:TextStyle(color:gold,fontSize:10,fontWeight:FontWeight.w900,letterSpacing:1.1)),
+              const SizedBox(height:7),Text(money(total),style:const TextStyle(color:Colors.white,fontSize:27,fontWeight:FontWeight.w900)),
+              const SizedBox(height:12),_checkoutSummary('Items subtotal',model.subtotal),_checkoutSummary('Delivery',delivery),if(taxRate>=0)_checkoutSummary('Tax · $taxRate%',tax),
+              const Divider(color:Color(0x55FFFFFF),height:20),
+              Row(children:[const Icon(Icons.receipt_long_outlined,color:gold,size:17),const SizedBox(width:7),Expanded(child:Text('Invoice payment · details shown after order',style:const TextStyle(color:Color(0xFFE5EDFF),fontSize:11,fontWeight:FontWeight.w700)))]),
+            ])),
+            const SizedBox(height:15),
+            _CheckoutPanel(title:'Delivery details',subtitle:'Where should we bring your order?',icon:Icons.location_on_outlined,child:Column(children:[
+              TextFormField(controller:name,decoration:const InputDecoration(labelText:'Full name'),validator:(v)=>(v??'').trim().length>=2?null:'Please enter your name'),
+              if(savedAddresses.isNotEmpty) ...[
+                const SizedBox(height:11),
+                DropdownButtonFormField<String>(value:selectedSavedAddress,decoration:const InputDecoration(labelText:'Use a saved delivery address'),items:savedAddresses.map((item)=>DropdownMenuItem<String>(value:textOf(item['id']),child:Text('${textOf(item['label'])} · ${textOf(item['city'])}',overflow:TextOverflow.ellipsis))).toList(),onChanged:(value){if(value!=null)selectAddress(value);}),
+              ],
+              const SizedBox(height:11),TextFormField(controller:phone,keyboardType:TextInputType.phone,decoration:const InputDecoration(labelText:'Phone number'),validator:(v)=>(v??'').trim().length>=8?null:'Enter your phone number'),
+              const SizedBox(height:11),TextFormField(controller:city,decoration:const InputDecoration(labelText:'City'),validator:(v)=>(v??'').trim().length>=2?null:'Enter your city'),
+              const SizedBox(height:11),TextFormField(controller:address,decoration:const InputDecoration(labelText:'Street, building, landmark'),validator:(v)=>(v??'').trim().length>=5?null:'Enter your delivery address'),
+            ])),
             const SizedBox(height:13),
-            TextFormField(controller:phone,keyboardType:TextInputType.phone,decoration:const InputDecoration(labelText:'Phone number'),validator:(v)=>(v??'').trim().length>=8?null:'Enter your phone number'),
+            _CheckoutPanel(title:'Payment by invoice',subtitle:'Choose how you plan to pay.',icon:Icons.account_balance_wallet_outlined,child:Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
+              DropdownButtonFormField<String>(value:paymentMethodId,decoration:const InputDecoration(labelText:'Payment method'),items:methods.map((method)=>DropdownMenuItem<String>(value:textOf(method['id']),child:Text(textOf(method['label'])))).toList(),onChanged:(value)=>setState(()=>paymentMethodId=value),validator:(value)=>value==null?'Choose a payment method':null),
+              const SizedBox(height:10),Container(padding:const EdgeInsets.all(12),decoration:BoxDecoration(color:const Color(0xFFEFF5FF),borderRadius:BorderRadius.circular(13)),child:Row(crossAxisAlignment:CrossAxisAlignment.start,children:[const Icon(Icons.info_outline,color:blue,size:18),const SizedBox(width:8),Expanded(child:Text(config['checkoutEnabled']==true?'Your order invoice will include the store payment instructions and account details.':checkoutBlockedReason.isEmpty?'Checkout is not available right now.':checkoutBlockedReason,style:const TextStyle(color:navy,fontSize:11,height:1.4)))])),
+            ])),
             const SizedBox(height:13),
-            TextFormField(controller:city,decoration:const InputDecoration(labelText:'City'),validator:(v)=>(v??'').trim().length>=2?null:'Enter your city'),
-            const SizedBox(height:13),
-            TextFormField(controller:address,decoration:const InputDecoration(labelText:'Delivery address'),validator:(v)=>(v??'').trim().length>=5?null:'Enter your delivery address'),
-            const SizedBox(height:13),
-            DropdownButtonFormField<String>(
-              value: paymentMethodId,
-              decoration: const InputDecoration(labelText: 'Invoice payment method'),
-              items: methods.map((method) => DropdownMenuItem<String>(
-                value: textOf(method['id']), child: Text(textOf(method['label'])),
-              )).toList(),
-              onChanged: (value) => setState(() => paymentMethodId = value),
-              validator: (value) => value == null ? 'Choose a payment method' : null,
+            _CheckoutPanel(title:'Anything else?',subtitle:'Add a delivery note if it helps.',icon:Icons.chat_bubble_outline,child:TextFormField(controller:note,maxLines:3,decoration:const InputDecoration(labelText:'Optional order note',hintText:'Apartment, gate, or delivery instructions')),
             ),
-            const SizedBox(height:13),
-            TextFormField(controller:note,maxLines:2,decoration:const InputDecoration(labelText:'Notes (optional)')),
-            if(error!=null)Padding(padding:const EdgeInsets.only(top:15),child:Text(error!,style:const TextStyle(color:Colors.red))),
-            const SizedBox(height:22),
-            FilledButton(onPressed:busy||!enabled||paymentMethodId==null?null:submit,child:Text(busy?'Placing order...':'Place order — ${money(total)}')),
+            if(error!=null)Padding(padding:const EdgeInsets.only(top:14),child:Container(padding:const EdgeInsets.all(12),decoration:BoxDecoration(color:const Color(0xFFFFEEEE),borderRadius:BorderRadius.circular(12)),child:Text(error!,style:const TextStyle(color:Colors.red,fontSize:12)))),
+            const SizedBox(height:17),
+            SizedBox(height:54,child:FilledButton.icon(onPressed:busy||!enabled||paymentMethodId==null?null:submit,icon:busy?const SizedBox(width:18,height:18,child:CircularProgressIndicator(strokeWidth:2,color:Colors.white)):const Icon(Icons.lock_outline),label:Text(busy?'Placing your order…':'Place order  ·  ${money(total)}'))),
+            const SizedBox(height:9),const Text('Your order is sent securely to IwacuMall for confirmation.',textAlign:TextAlign.center,style:TextStyle(color:Colors.blueGrey,fontSize:10)),
           ]),
         ),
       ),
@@ -1011,10 +1275,28 @@ class _CheckoutPageState extends State<CheckoutPage> {
   }
 }
 
-Widget _invoiceSummary(String label, dynamic amount) => Padding(
+Widget _checkoutSummary(String label, dynamic amount) => Padding(
   padding: const EdgeInsets.symmetric(vertical: 3),
-  child: Row(children: [Text(label), const Spacer(), Text(money(amount), style: const TextStyle(fontWeight: FontWeight.w700))]),
+  child: Row(children: [Text(label,style:const TextStyle(color:Color(0xFFDDE9FF),fontSize:12)), const Spacer(), Text(money(amount), style: const TextStyle(color:Colors.white,fontWeight:FontWeight.w800,fontSize:12))]),
 );
+
+class _CheckoutPanel extends StatelessWidget {
+  const _CheckoutPanel({required this.title, required this.subtitle, required this.icon, required this.child});
+  final String title;
+  final String subtitle;
+  final IconData icon;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.all(15),
+    decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(18), border: Border.all(color: const Color(0xFFE7ECF4))),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Row(children: [Container(width: 38,height: 38,decoration:BoxDecoration(color:const Color(0xFFEAF1FF),borderRadius:BorderRadius.circular(12)),child:Icon(icon,color:blue,size:20)),const SizedBox(width:10),Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(title,style:const TextStyle(color:navy,fontWeight:FontWeight.w900,fontSize:14)),const SizedBox(height:2),Text(subtitle,style:const TextStyle(color:Colors.blueGrey,fontSize:10))]))]),
+      const SizedBox(height:14),child,
+    ]),
+  );
+}
 
 Future<void> showInvoiceDialog(BuildContext context, Map<String, dynamic> order) => showDialog<void>(
   context: context,

@@ -1,7 +1,7 @@
 name: iwacumall_mobile
 description: IwacuMall Android shopping application – shared e-commerce API.
 publish_to: none
-version: 1.0.0+1
+version: 1.0.1+2
 
 environment:
   sdk: '>=3.5.0 <4.0.0'

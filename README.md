@@ -11,7 +11,7 @@ IwacuMall is a responsive shopping website and Flutter Android client backed by 
 - Admin screens for orders, fulfilment, products, categories, store settings and payment methods.
 - Draft privacy, sale terms and delivery-policy pages that require owner completion before publication.
 
-The product catalogue contains demonstration items until the owner replaces them. The project has not been deployed and does not yet have a confirmed production domain, SMTP provider, payment accounts, delivery coverage or approved legal terms.
+The product catalogue still contains demonstration items until the owner replaces them. The owner has deployed the app to an Ubuntu VPS at `https://iwacumall.com`, with the admin at `https://admin.iwacumall.com`. VPS output confirmed the API health endpoint and Atlas connection; public checkout, admin workflows and real email delivery still need owner verification.
 
 ## Requirements
 
@@ -70,11 +70,17 @@ flutter run --dart-define=IWACUMALL_API_URL=http://10.0.2.2:4000
 
 The Android platform scaffold is already included. The URL above is for an Android emulator. For a physical phone on the same Wi-Fi, set the development server `HOST=0.0.0.0`, allow it through the computer firewall, and use `http://<computer-LAN-IP>:4000`. Debug builds permit local HTTP; release builds require HTTPS.
 
-For a release build, the app refuses a non-HTTPS API URL. Use the real verified API domain and configure Android signing, app identity, store listing and privacy disclosures before publishing.
+The app defaults to `https://iwacumall.com`; use the local API override in the run command above when developing against the emulator. Build the production APK after configuring the Android release signing key:
+
+```bash
+flutter build apk --release --target-platform android-arm64
+```
+
+The release app requires HTTPS. Google sign-in reads its web client ID from the production `/api/config`; the server must have `GOOGLE_WEB_CLIENT_ID` configured and Google's Android OAuth client must match `com.iwacumall.app` and the signing certificate SHA-1.
 
 ## Deployment and review
 
-See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md), and [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md). Configure a domain and TLS, Atlas network access and backups, SMTP and sender DNS, monitoring, incident contacts, and restore procedures before launch.
+Use [docs/VPS_UPDATE.md](docs/VPS_UPDATE.md) for routine production updates. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md), and [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) for technical context and remaining owner checks.
 
 GitHub Actions runs the isolated API integration suite and JavaScript syntax checks on pushes and pull requests. A separate job analyzes Flutter and builds an unsigned arm64 debug APK, retained as a seven-day workflow artifact. CI uses no production secrets and does not deploy the site or publish the app.
 
