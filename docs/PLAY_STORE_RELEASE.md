@@ -32,7 +32,9 @@ The output should be:
 mobile/build/app/outputs/bundle/release/app-release.aab
 ```
 
-The current app version is set in `mobile/pubspec.yaml` as `1.0.1+2`. Increase the build number after each upload (for example, use `1.0.2+3` for the next bundle). Never put passwords or keystore bytes in Gradle files, GitHub, a release attachment, or a public artifact.
+The current app version is set in `mobile/pubspec.yaml` as `1.0.2+3`. Increase the build number after each upload. Never put passwords or keystore bytes in Gradle files, GitHub, a release attachment, or a public artifact.
+
+The Android minimum SDK is 24 to meet Google Play automatic protection's minimum-version requirement.
 
 ## Google sign-in for release builds
 
@@ -67,6 +69,8 @@ Do not put the Google OAuth client secret in the Flutter app. Only the public We
 - Run the closed test before production. Personal Play Console accounts created after November 13, 2023 need at least 12 testers continuously opted in for 14 days before applying for production access.
 - Before each later release, increase the build number and use the same registered upload key (or complete an upload-key reset through Play Console if it is lost).
 
-## Local toolchain note
+## Verified local release build
 
-At preparation time, the Flutter command installed on this Mac aborts inside `cpuinfo_mac.cc` while starting its bundled Dart 3.6.2 runtime. Upgrade/install a current stable Flutter SDK before building; this repository configuration and the keystore are prepared, but no AAB can be claimed until the release build succeeds.
+On November 15, 2026, Flutter 3.27.4 and JDK 17 successfully built `mobile/build/app/outputs/bundle/release/app-release.aab` for package `com.iwacumall.app`, version `1.0.2` (version code `3`) and minimum SDK 24. The bundle passed `jarsigner` verification and is signed with the upload certificate fingerprint above. The AAB is a local build artifact under the ignored `mobile/build/` directory; build it again with the commands above when preparing another release.
+
+The build reported that the project selects Android NDK `26.1.10909125` while several plugins request `27.0.12077973`. The build completed successfully. Consider aligning `ndkVersion` with the plugin requirement before the next release build.
