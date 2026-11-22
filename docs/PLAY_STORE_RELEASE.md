@@ -32,7 +32,7 @@ The output should be:
 mobile/build/app/outputs/bundle/release/app-release.aab
 ```
 
-The current app version is set in `mobile/pubspec.yaml` as `1.0.2+3`. Increase the build number after each upload. Never put passwords or keystore bytes in Gradle files, GitHub, a release attachment, or a public artifact.
+The current app version is set in `mobile/pubspec.yaml` as `1.0.3+4`. Increase the build number after each upload. Never put passwords or keystore bytes in Gradle files, GitHub, a release attachment, or a public artifact.
 
 The Android minimum SDK is 24 to meet Google Play automatic protection's minimum-version requirement.
 
@@ -71,6 +71,6 @@ Do not put the Google OAuth client secret in the Flutter app. Only the public We
 
 ## Verified local release build
 
-On November 15, 2026, Flutter 3.27.4 and JDK 17 successfully built `mobile/build/app/outputs/bundle/release/app-release.aab` for package `com.iwacumall.app`, version `1.0.2` (version code `3`) and minimum SDK 24. The bundle passed `jarsigner` verification and is signed with the upload certificate fingerprint above. The AAB is a local build artifact under the ignored `mobile/build/` directory; build it again with the commands above when preparing another release.
+On November 15, 2026, Flutter 3.27.4 and JDK 17 successfully built `mobile/build/app/outputs/bundle/release/app-release.aab` for package `com.iwacumall.app`, version `1.0.3` (version code `4`) and minimum SDK 24. The bundle passed `bundletool` validation and `jarsigner` verification and is signed with the upload certificate fingerprint above. This build includes the branded native and animated Flutter launch screens. The AAB is a local build artifact under the ignored `mobile/build/` directory; build it again with the commands above when preparing another release.
 
 The build reported that the project selects Android NDK `26.1.10909125` while several plugins request `27.0.12077973`. The build completed successfully. Consider aligning `ndkVersion` with the plugin requirement before the next release build.

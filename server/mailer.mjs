@@ -149,7 +149,8 @@ export async function sendOrderInvoiceEmail(order, storeSettings = {}, pdfBuffer
   const createdAt = formatStoreDate(order.createdAt);
   const amount = value => formatAmount(value, currency);
   const items = (order.items || []).map(item => ({
-    name: `${String(item.productName || item.productId || 'Item')}${item.isSecondHand === true ? ' · Pre-owned' : ''}`,
+    name: `${String(item.productName || item.productId || 'Item')}${item.isSecondHand === true ? ' · Second hand' : ''}`,
+    condition: item.isSecondHand === true ? `Condition: ${({ 'like-new': 'Like new', good: 'Good', fair: 'Fair', 'for-parts': 'For parts or repair' })[item.conditionGrade] || 'Grade not set'}${item.conditionNotes ? ` · ${item.conditionNotes}` : ''}` : '',
     quantity: Number(item.quantity || 1),
     unitPrice: Number(item.unitPrice || 0),
   }));
@@ -167,7 +168,7 @@ export async function sendOrderInvoiceEmail(order, storeSettings = {}, pdfBuffer
     `Delivery address: ${address || '—'}`,
     '',
     'ORDER SUMMARY',
-    ...items.map(item => `- ${item.name} × ${item.quantity} at ${amount(item.unitPrice)}: ${amount(item.unitPrice * item.quantity)}`),
+    ...items.flatMap(item => [`- ${item.name} × ${item.quantity} at ${amount(item.unitPrice)}: ${amount(item.unitPrice * item.quantity)}`, ...(item.condition ? [`  ${item.condition}`] : [])]),
     '',
     `Subtotal: ${amount(order.subtotal)}`,
     `Delivery fee: ${Number(order.deliveryFee || 0) === 0 ? 'FREE' : amount(order.deliveryFee)}`,
@@ -190,7 +191,7 @@ export async function sendOrderInvoiceEmail(order, storeSettings = {}, pdfBuffer
   ].join('\n');
 
   const esc = escapeHtml;
-  const itemRows = items.map(item => `<tr><td style="padding:11px 8px;border-bottom:1px solid #e8edf5;color:#26364f">${esc(item.name)}<div style="margin-top:3px;font-size:12px;color:#718096">${item.quantity} × ${amount(item.unitPrice)}</div></td><td style="padding:11px 8px;border-bottom:1px solid #e8edf5;text-align:right;font-weight:700;white-space:nowrap">${amount(item.unitPrice * item.quantity)}</td></tr>`).join('');
+  const itemRows = items.map(item => `<tr><td style="padding:11px 8px;border-bottom:1px solid #e8edf5;color:#26364f">${esc(item.name)}${item.condition ? `<div style="margin-top:4px;font-size:12px;color:#765a2b">${esc(item.condition)}</div>` : ''}<div style="margin-top:3px;font-size:12px;color:#718096">${item.quantity} × ${amount(item.unitPrice)}</div></td><td style="padding:11px 8px;border-bottom:1px solid #e8edf5;text-align:right;font-weight:700;white-space:nowrap">${amount(item.unitPrice * item.quantity)}</td></tr>`).join('');
   const addressCard = `<div style="border:1px solid #e5ebf5;border-radius:10px;padding:14px;margin:16px 0"><strong style="color:#081f62">${recipientIsStore ? 'Customer and delivery details' : 'Delivery details'}</strong><div style="margin-top:8px;line-height:1.65;color:#475569">${esc(order.customerName || 'Customer')}<br><a href="mailto:${esc(order.customerEmail || '')}" style="color:#1455D9">${esc(order.customerEmail || 'Email not available')}</a><br>${esc(order.phone || 'Phone not provided')}<br>${esc(address || 'Delivery address not provided')}</div></div>`;
   const totals = `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:12px;color:#475569"><tr><td style="padding:5px 0">Subtotal</td><td align="right">${amount(order.subtotal)}</td></tr><tr><td style="padding:5px 0">Delivery</td><td align="right">${Number(order.deliveryFee || 0) === 0 ? 'FREE' : amount(order.deliveryFee)}</td></tr><tr><td style="padding:5px 0">Tax / VAT</td><td align="right">${amount(order.taxAmount)}</td></tr><tr><td colspan="2" style="border-top:1px solid #dce4f0;padding-top:12px"></td></tr><tr><td style="font-weight:800;font-size:17px;color:#081f62">Total due</td><td align="right" style="font-weight:800;font-size:17px;color:#1455D9">${amount(order.total)}</td></tr></table>`;
   const payment = `<div style="background:#fffdf5;border:1px solid #f2d46f;border-radius:10px;padding:16px;margin-top:18px"><div style="font-size:11px;letter-spacing:1px;text-transform:uppercase;color:#956d00;font-weight:800">${recipientIsStore ? 'Payment details sent to customer' : 'Payment instructions'}</div><h2 style="font-size:16px;margin:7px 0 10px;color:#081f62">${esc(snapshot.label || 'Manual payment')}</h2><div style="white-space:pre-wrap;line-height:1.65;color:#334155">${esc(snapshot.instructions || 'Please contact the store for payment instructions.')}</div><div style="margin-top:12px;line-height:1.75;color:#334155">Account name: <strong>${esc(snapshot.accountName || 'As stated above')}</strong><br>Account / number: <strong>${esc(snapshot.accountNumber || 'As stated above')}</strong><br>Payment reference: <strong>${esc(order.invoiceNumber || '—')}</strong><br>Pay by: <strong>${esc(deadline)}</strong><br>Payment status: <strong>${esc(String(order.paymentStatus || 'PENDING').replace(/_/g, ' '))}</strong></div></div>`;

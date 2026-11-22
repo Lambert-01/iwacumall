@@ -135,9 +135,13 @@ export function generateInvoicePdf(order, storeConfig = {}) {
       let isAlt = false;
 
       for (const item of items) {
-        const productName = `${String(item.productName || item.productId || 'Item')}${item.isSecondHand === true ? ' · Pre-owned' : ''}`;
+        const productName = `${String(item.productName || item.productId || 'Item')}${item.isSecondHand === true ? ' · Second hand' : ''}`;
+        const conditionGrade = ({ 'like-new': 'Like new', good: 'Good', fair: 'Fair', 'for-parts': 'For parts or repair' })[item.conditionGrade] || 'Grade not set';
+        const productDetails = item.isSecondHand === true
+          ? `${productName}\nCondition: ${conditionGrade}${item.conditionNotes ? `\n${item.conditionNotes}` : ''}`
+          : productName;
         doc.font('Helvetica').fontSize(8.5);
-        const rowHeight = Math.max(20, Math.ceil(doc.heightOfString(productName, { width: 280 })) + 8);
+        const rowHeight = Math.max(20, Math.ceil(doc.heightOfString(productDetails, { width: 280 })) + 8);
         if (tableY + rowHeight > 725) {
           doc.addPage();
           tableY = 50;
@@ -150,7 +154,7 @@ export function generateInvoicePdf(order, storeConfig = {}) {
         }
 
         doc.fillColor('#2D3748').fontSize(8.5).font('Helvetica')
-          .text(productName, 50, tableY + 4, { width: 280, height: rowHeight - 6 })
+          .text(productDetails, 50, tableY + 4, { width: 280, height: rowHeight - 6 })
           .text(String(item.quantity || 1), 340, tableY + 5, { width: 40, align: 'center' })
           .text(formatMoney(item.unitPrice), 390, tableY + 5, { width: 75, align: 'right' })
           .font('Helvetica-Bold')

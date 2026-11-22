@@ -592,6 +592,281 @@ Future<void> main() async {
   unawaited(model.initialize());
 }
 
+class StoreLaunchGate extends StatefulWidget {
+  const StoreLaunchGate({super.key});
+
+  @override
+  State<StoreLaunchGate> createState() => _StoreLaunchGateState();
+}
+
+class _StoreLaunchGateState extends State<StoreLaunchGate>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _entrance;
+  Timer? _minimumSplashTimer;
+  bool _storeReady = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _entrance = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1050),
+    )..forward();
+    _minimumSplashTimer = Timer(const Duration(milliseconds: 1750), () {
+      if (mounted) setState(() => _storeReady = true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _minimumSplashTimer?.cancel();
+    _entrance.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedSwitcher(
+        duration: const Duration(milliseconds: 430),
+        switchInCurve: Curves.easeOutCubic,
+        switchOutCurve: Curves.easeIn,
+        transitionBuilder: (child, animation) => FadeTransition(
+          opacity: animation,
+          child: SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(0, .018),
+              end: Offset.zero,
+            ).animate(
+                CurvedAnimation(parent: animation, curve: Curves.easeOut)),
+            child: child,
+          ),
+        ),
+        child: _storeReady
+            ? const ShopShell(key: ValueKey('shop-shell'))
+            : IwacuMallSplash(
+                key: const ValueKey('iwacumall-splash'),
+                entrance: _entrance,
+              ),
+      );
+}
+
+class IwacuMallSplash extends StatelessWidget {
+  const IwacuMallSplash({super.key, required this.entrance});
+
+  final Animation<double> entrance;
+
+  @override
+  Widget build(BuildContext context) {
+    final size = MediaQuery.of(context).size;
+    final logoMotion = CurvedAnimation(
+      parent: entrance,
+      curve: Curves.easeOutBack,
+    );
+    final copyFade = CurvedAnimation(
+      parent: entrance,
+      curve: const Interval(.18, .82, curve: Curves.easeOut),
+    );
+
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: const SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: Brightness.light,
+        systemNavigationBarColor: Color(0xFF081F62),
+        systemNavigationBarIconBrightness: Brightness.light,
+      ),
+      child: Scaffold(
+        backgroundColor: navy,
+        body: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            const Positioned.fill(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      Color(0xFF07194C),
+                      Color(0xFF144AB9),
+                      Color(0xFF0A2B78),
+                    ],
+                    stops: [0, .52, 1],
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              top: -size.height * .11,
+              right: -105,
+              child: _SplashHalo(diameter: size.height * .43),
+            ),
+            Positioned(
+              left: -130,
+              bottom: size.height * .13,
+              child: _SplashHalo(diameter: size.height * .36),
+            ),
+            Positioned(
+              right: 38,
+              top: size.height * .28,
+              child: const Icon(
+                Icons.auto_awesome_rounded,
+                color: gold,
+                size: 20,
+              ),
+            ),
+            SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(24, 30, 24, 22),
+                child: Column(
+                  children: [
+                    const Spacer(),
+                    ScaleTransition(
+                      scale:
+                          Tween<double>(begin: .78, end: 1).animate(logoMotion),
+                      child: Container(
+                        width: 164,
+                        height: 164,
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(42),
+                          border: Border.all(
+                            color: Colors.white.withOpacity(.85),
+                            width: 1.5,
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: const Color(0xFF03133F).withOpacity(.28),
+                              blurRadius: 34,
+                              offset: const Offset(0, 18),
+                            ),
+                            BoxShadow(
+                              color: gold.withOpacity(.22),
+                              blurRadius: 42,
+                              spreadRadius: 2,
+                            ),
+                          ],
+                        ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(34),
+                          child:
+                              Image.asset('assets/logo.png', fit: BoxFit.cover),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 28),
+                    FadeTransition(
+                      opacity: copyFade,
+                      child: Column(
+                        children: [
+                          RichText(
+                            text: const TextSpan(
+                              style: TextStyle(
+                                fontSize: 35,
+                                height: 1,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: -.8,
+                              ),
+                              children: [
+                                TextSpan(
+                                    text: 'Iwacu',
+                                    style: TextStyle(color: Colors.white)),
+                                TextSpan(
+                                    text: 'Mall',
+                                    style: TextStyle(color: gold)),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            'Your home of everything',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: Colors.white.withOpacity(.84),
+                              fontSize: 16,
+                              fontWeight: FontWeight.w500,
+                              letterSpacing: .2,
+                            ),
+                          ),
+                          const SizedBox(height: 20),
+                          Container(
+                            width: 42,
+                            height: 3,
+                            decoration: BoxDecoration(
+                              color: gold,
+                              borderRadius: BorderRadius.circular(99),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Spacer(),
+                    TweenAnimationBuilder<double>(
+                      tween: Tween(begin: 0, end: 1),
+                      duration: const Duration(milliseconds: 1600),
+                      curve: Curves.easeInOutCubic,
+                      builder: (context, value, _) => SizedBox(
+                        width: 142,
+                        height: 4,
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(99),
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              ColoredBox(color: Colors.white.withOpacity(.2)),
+                              FractionallySizedBox(
+                                widthFactor: value,
+                                alignment: Alignment.centerLeft,
+                                child: const ColoredBox(color: gold),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 15),
+                    Text(
+                      'SHOP  •  DISCOVER  •  ENJOY',
+                      style: TextStyle(
+                        color: Colors.white.withOpacity(.7),
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 2.1,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SplashHalo extends StatelessWidget {
+  const _SplashHalo({required this.diameter});
+
+  final double diameter;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        width: diameter,
+        height: diameter,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white.withOpacity(.075)),
+          boxShadow: [
+            BoxShadow(
+              color: blue.withOpacity(.16),
+              blurRadius: 38,
+              spreadRadius: 14,
+            ),
+          ],
+        ),
+      );
+}
+
 class IwacuMallApp extends StatelessWidget {
   const IwacuMallApp({super.key});
   @override
@@ -629,7 +904,7 @@ class IwacuMallApp extends StatelessWidget {
             border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
           ),
         ),
-        home: const ShopShell(),
+        home: const StoreLaunchGate(),
       );
 }
 
@@ -674,6 +949,15 @@ class _ShopShellState extends State<ShopShell> {
 }
 
 String imageUrl(String path) => path.startsWith('https://') ? path : '$apiBase$path';
+String conditionGradeLabel(dynamic value) {
+  switch (textOf(value)) {
+    case 'like-new': return 'Like new';
+    case 'good': return 'Good';
+    case 'fair': return 'Fair';
+    case 'for-parts': return 'For parts or repair';
+    default: return 'Grade not set';
+  }
+}
 Widget productImage(String path, {BoxFit fit = BoxFit.cover}) {
   if (path.isEmpty) return const Center(child:Icon(Icons.shopping_bag,size:60,color:blue));
   final url = imageUrl(path);
@@ -828,7 +1112,7 @@ class ProductTile extends StatelessWidget {
                     Positioned(
                       left: 8,
                       bottom: 8,
-                      child: _quickViewBadge('PRE-OWNED', const Color(0xFFFFF8E8), const Color(0xFF82561A)),
+                      child: _quickViewBadge('SECOND HAND', const Color(0xFFFFF8E8), const Color(0xFF82561A)),
                     ),
                   Positioned(
                     right: 8,
@@ -952,7 +1236,7 @@ class _ProductQuickViewSheetState extends State<_ProductQuickViewSheet> {
             color: const Color(0xFFF2F5FB),
             child: Stack(children: [
               Positioned.fill(child: Padding(padding: const EdgeInsets.all(13), child: productImage(images.isEmpty ? '' : images[selectedImageIndex.clamp(0, images.length - 1).toInt()], fit: BoxFit.contain))),
-              if (product['isSecondHand'] == true) Positioned(left: 13, top: 13, child: _quickViewBadge('PRE-OWNED', const Color(0xFFFFF4D9), const Color(0xFF82561A))),
+              if (product['isSecondHand'] == true) Positioned(left: 13, top: 13, child: _quickViewBadge('SECOND HAND', const Color(0xFFFFF4D9), const Color(0xFF82561A))),
               if (loadingDetails) const Positioned(left: 0, right: 0, bottom: 0, child: LinearProgressIndicator(minHeight: 2)),
               Positioned(right: 10, top: 10, child: Material(color: Colors.white.withOpacity(.94), shape: const CircleBorder(), child: IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.close, color: navy)))),
               if (images.length > 1) Positioned(left: 0, right: 0, bottom: 11, child: SizedBox(height: 55, child: ListView.separated(
@@ -973,6 +1257,26 @@ class _ProductQuickViewSheetState extends State<_ProductQuickViewSheet> {
           Text(variants.isNotEmpty ? 'From ${money(product['price'])}' : money(price), style: const TextStyle(color: blue, fontWeight: FontWeight.w900, fontSize: 21)),
           const SizedBox(height: 10),
           Text(textOf(product['description']).isEmpty ? 'A quality everyday find, selected for you.' : textOf(product['description']), style: const TextStyle(height: 1.5, color: Color(0xFF52627B))),
+          if (product['isSecondHand'] == true) ...[
+            const SizedBox(height: 14),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(color: const Color(0xFFFFFAF0), border: Border.all(color: const Color(0xFFF0DFB8)), borderRadius: BorderRadius.circular(15)),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Text('SECOND HAND CONDITION', style: TextStyle(color: Color(0xFF82561A), fontSize: 10, fontWeight: FontWeight.w900, letterSpacing: .8)),
+                const SizedBox(height: 5),
+                Text(conditionGradeLabel(product['conditionGrade']), style: const TextStyle(color: Color(0xFF634819), fontSize: 14, fontWeight: FontWeight.w900)),
+                if (textOf(product['conditionNotes']).trim().isNotEmpty) ...[
+                  const SizedBox(height: 5),
+                  Text(textOf(product['conditionNotes']), style: const TextStyle(color: Color(0xFF765A2B), fontSize: 12, height: 1.5)),
+                ] else ...[
+                  const SizedBox(height: 5),
+                  const Text('No additional condition notes were provided.', style: TextStyle(color: Color(0xFF765A2B), fontSize: 12, height: 1.5)),
+                ],
+              ]),
+            ),
+          ],
           if (variants.isNotEmpty) ...[
             const SizedBox(height: 19),
             Row(children: [const Expanded(child: Text('Choose your option', style: TextStyle(color: navy, fontWeight: FontWeight.w900, fontSize: 15))), Text('${variants.length} options', style: const TextStyle(color: Colors.blueGrey, fontSize: 11, fontWeight: FontWeight.w700))]),
@@ -995,7 +1299,7 @@ class _ProductQuickViewSheetState extends State<_ProductQuickViewSheet> {
             Icon(productAvailable ? Icons.verified_rounded : Icons.remove_shopping_cart, color: productAvailable ? const Color(0xFF188653) : Colors.red, size: 20),
             const SizedBox(width: 9),
             Expanded(child: Text(!productAvailable ? 'Currently unavailable' : tracksInventory ? (stock < 6 ? 'Only $stock left' : 'Available now') : 'Available now', style: TextStyle(fontWeight: FontWeight.w800, color: productAvailable ? const Color(0xFF188653) : Colors.red))),
-            if (product['isSecondHand'] == true) _quickViewBadge('PRE-OWNED', const Color(0xFFFFF4D9), const Color(0xFF82561A)),
+            if (product['isSecondHand'] == true) _quickViewBadge('SECOND HAND', const Color(0xFFFFF4D9), const Color(0xFF82561A)),
           ])),
           if (relatedProducts.isNotEmpty) ...[
             const SizedBox(height: 22),
@@ -1084,7 +1388,7 @@ class CartPage extends StatelessWidget {
           const SizedBox(width:12),Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
             Text(textOf(p['name']),maxLines:2,overflow:TextOverflow.ellipsis,style:const TextStyle(fontWeight:FontWeight.w900,color:navy,fontSize:14)),
             if(option.isNotEmpty)Padding(padding:const EdgeInsets.only(top:5),child:Text(option,style:const TextStyle(color:Colors.blueGrey,fontSize:11,fontWeight:FontWeight.w700))),
-            if(p['isSecondHand']==true)Padding(padding:const EdgeInsets.only(top:5),child:_quickViewBadge('PRE-OWNED',const Color(0xFFFFF4D9),const Color(0xFF82561A))),
+            if(p['isSecondHand']==true)Padding(padding:const EdgeInsets.only(top:5),child:_quickViewBadge('SECOND HAND',const Color(0xFFFFF4D9),const Color(0xFF82561A))),
             const SizedBox(height:7),Text(money(p['_linePrice']),style:const TextStyle(color:blue,fontWeight:FontWeight.w900,fontSize:15)),
             Row(children:[_cartQuantityButton(Icons.remove,()=>model.changeQuantity(id,-1)),Padding(padding:const EdgeInsets.symmetric(horizontal:9),child:Text('${model.cart[id]}',style:const TextStyle(color:navy,fontWeight:FontWeight.w900))),_cartQuantityButton(Icons.add,()=>model.changeQuantity(id,1)),const Spacer(),IconButton(tooltip:'Remove item',onPressed:()=>model.changeQuantity(id,-model.cart[id]!),icon:const Icon(Icons.delete_outline,color:Colors.blueGrey,size:20))]),
           ])),

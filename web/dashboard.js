@@ -30,8 +30,11 @@ async function api(path, options = {}) {
   const data = await response.json();
   if (!response.ok) {
     const message = data.error || 'Request failed';
-    console.error(`[admin API] ${options.method || 'GET'} ${path} returned HTTP ${response.status}: ${message}`);
-    throw Error(message);
+    const requestId = response.headers.get('X-Request-ID') || data.requestId || '';
+    console.error(`[admin API] ${options.method || 'GET'} ${path} returned HTTP ${response.status}${requestId ? ` request_id=${requestId}` : ''}: ${message}`);
+    const error = Error(message);
+    error.requestId = requestId;
+    throw error;
   }
   return data;
 }
@@ -44,6 +47,108 @@ function notify(message) {
   notify.timer = setTimeout(() => element.classList.remove('show'), 3000);
 }
 function errorBox(error) { return `<div class="empty-state">${esc(error.message || error)}</div>`; }
+
+const adminTabCopy = {
+  orders: { kicker: 'OPERATIONS · SALES', title: 'Orders and fulfillment', description: 'Review new purchases, confirm orders, and keep delivery moving.', pill: 'Order workspace' },
+  email: { kicker: 'OPERATIONS · CUSTOMER CARE', title: 'Email delivery', description: 'Monitor invoices and order updates sent to customers and your store inbox.', pill: 'Delivery monitor' },
+  products: { kicker: 'CATALOG · INVENTORY', title: 'Product catalog', description: 'Keep product information, photos, prices, and availability accurate.', pill: 'Catalog manager' },
+  categories: { kicker: 'CATALOG · ORGANIZATION', title: 'Product categories', description: 'Group products into clear sections customers can browse.', pill: 'Shop organization' },
+  settings: { kicker: 'STORE · CONFIGURATION', title: 'Store settings', description: 'Manage checkout rules, store details, and invoice payment instructions.', pill: 'Store controls' },
+};
+
+function setSidebarBadge(id, value, alert = false, label = 'items') {
+  const badge = document.getElementById(id);
+  if (!badge) return;
+  const count = Math.max(0, Number(value) || 0);
+  badge.textContent = count > 99 ? '99+' : String(count);
+  badge.hidden = count === 0;
+  badge.classList.toggle('is-alert', alert && count > 0);
+  badge.setAttribute('aria-label', `${count} ${label}`);
+}
+
+function activateAdminTab(tabName, { updateHistory = false, closeDrawer = true, focus = false } = {}) {
+  if (!adminTabCopy[tabName]) return;
+  const tabs = [...document.querySelectorAll('#adminNav [role="tab"][data-tab]')];
+  tabs.forEach(tab => {
+    const active = tab.dataset.tab === tabName;
+    tab.classList.toggle('active', active);
+    tab.setAttribute('aria-selected', String(active));
+    tab.tabIndex = active ? 0 : -1;
+    if (active) tab.setAttribute('aria-current', 'page');
+    else tab.removeAttribute('aria-current');
+  });
+  document.querySelectorAll('.admin-panel').forEach(panel => {
+    const active = panel.id === `panel-${tabName}`;
+    panel.classList.toggle('active', active);
+    panel.hidden = !active;
+  });
+
+  const copy = adminTabCopy[tabName];
+  if ($('#adminPageKicker')) $('#adminPageKicker').textContent = copy.kicker;
+  if ($('#adminPageTitle')) $('#adminPageTitle').textContent = copy.title;
+  if ($('#adminPageDescription')) $('#adminPageDescription').textContent = copy.description;
+  if ($('#adminPagePillText')) $('#adminPagePillText').textContent = copy.pill;
+  document.title = `${copy.title} | IwacuMall Admin`;
+  document.body.dataset.activeAdminTab = tabName;
+
+  if (updateHistory && location.hash !== `#${tabName}`) {
+    const url = new URL(location.href);
+    url.hash = tabName;
+    history.pushState({ adminTab: tabName }, '', url);
+  }
+  if (closeDrawer) closeAdminSidebarDrawer();
+  if (focus) document.querySelector(`#adminTab${tabName[0].toUpperCase()}${tabName.slice(1)}`)?.focus();
+}
+
+function adminTabFromLocation() {
+  const tab = location.hash.replace(/^#/, '');
+  return adminTabCopy[tab] ? tab : 'orders';
+}
+
+function setAdminSidebarDrawer(open, { restoreFocus = false } = {}) {
+  const toggle = $('#adminSidebarToggle');
+  const overlay = $('#adminSidebarOverlay');
+  if (!toggle || !overlay) return;
+  document.body.classList.toggle('admin-drawer-open', open);
+  overlay.hidden = !open;
+  toggle.setAttribute('aria-expanded', String(open));
+  toggle.setAttribute('aria-label', open ? 'Close admin navigation' : 'Open admin navigation');
+  toggle.innerHTML = open
+    ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>'
+    : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>';
+  const content = $('#adminContent');
+  if (content) content.inert = open;
+  if (open) document.querySelector('#adminNav [aria-selected="true"]')?.focus();
+  else if (restoreFocus) toggle.focus();
+}
+
+function closeAdminSidebarDrawer() {
+  if (document.body.classList.contains('admin-drawer-open')) setAdminSidebarDrawer(false, { restoreFocus: true });
+}
+
+function initializeAdminSidebar(user) {
+  const name = $('#sidebarAdminName');
+  if (name) name.textContent = user?.name || 'Administrator';
+  try {
+    document.body.classList.toggle('admin-sidebar-collapsed', localStorage.getItem('iwm_admin_sidebar_collapsed') === 'true');
+  } catch {}
+  const collapsed = document.body.classList.contains('admin-sidebar-collapsed');
+  const collapse = $('#adminSidebarCollapse');
+  if (collapse) {
+    collapse.setAttribute('aria-expanded', String(!collapsed));
+    collapse.setAttribute('aria-label', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+    collapse.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
+  }
+  activateAdminTab(adminTabFromLocation(), { updateHistory: false, closeDrawer: false });
+}
+
+window.addEventListener('popstate', () => {
+  if (page === 'admin') activateAdminTab(adminTabFromLocation(), { updateHistory: false });
+});
+window.addEventListener('hashchange', () => {
+  if (page === 'admin') activateAdminTab(adminTabFromLocation(), { updateHistory: false });
+});
+
 function categoryIcon(slug) {
   return ({groceries:'🛒',electronics:'🎧','home-living':'🛋️',fashion:'👟','beauty-care':'🧴','fresh-produce':'🥑'})[slug] || '✦';
 }
@@ -125,8 +230,7 @@ function renderAdminOrderDetail(order) {
 }
 
 function renderAdminOrders() {
-  const count = $('#sidebarOrderCount');
-  if (count) count.textContent = adminOrdersOpenCount || '';
+  setSidebarBadge('sidebarOrderCount', adminOrdersOpenCount, false, adminOrdersOpenCount === 1 ? 'open order' : 'open orders');
   const first = adminOrdersTotal ? (adminOrdersPage - 1) * adminOrdersPageSize + 1 : 0;
   const last = Math.min(adminOrdersPage * adminOrdersPageSize, adminOrdersTotal);
   const countText = `${first}–${last} of ${adminOrdersTotal} order${adminOrdersTotal === 1 ? '' : 's'}`;
@@ -204,6 +308,8 @@ async function loadEmailOutbox() {
   const container = $('#emailOutboxJobs');
   if (!container) return;
   const { jobs } = await api('/admin/email-outbox');
+  const failedCount = (jobs || []).reduce((total, job) => total + (job.recipients || []).filter(recipient => recipient.status === 'FAILED').length, 0);
+  setSidebarBadge('sidebarEmailCount', failedCount, true, failedCount === 1 ? 'failed email delivery' : 'failed email deliveries');
   container.innerHTML = jobs.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>Order / event</th><th>Recipient</th><th>Delivery</th><th>Attempts</th><th>Updated</th><th>Actions</th></tr></thead><tbody>${jobs.flatMap(job => (job.recipients || []).map(recipient => {
     const isAuthEmail = job.eventType?.startsWith('AUTH_');
     const authLinkExpired = isAuthEmail && Date.parse(job.tokenExpiresAt) <= Date.now();
@@ -255,7 +361,7 @@ function renderProducts() {
     const available = isDeleted ? '<span class="admin-status-pill is-inactive">Deleted</span>' : `<button type="button" class="admin-availability ${isAvailable ? 'is-available' : 'is-unavailable'}" data-toggle-product="${esc(product.id)}" data-active="${isAvailable ? '1' : '0'}" aria-label="Mark ${esc(product.name)} ${isAvailable ? 'unavailable' : 'available'}" aria-pressed="${isAvailable}">${isAvailable ? 'Available' : 'Unavailable'}</button>`;
     const photo = product.imageUrl ? `<img class="admin-table-photo" src="${esc(product.imageUrl)}" alt="${esc(product.name)}" loading="lazy" onerror="this.src='/assets/products/fallback.png'">` : '<span class="admin-table-photo-placeholder">✦</span>';
     return `<tr>
-      <td><strong class="admin-table-primary">${esc(product.name)}</strong>${product.isSecondHand === true ? '<span class="condition-badge admin-condition-badge">Pre-owned</span>' : ''}${variantSummary}</td>
+      <td><strong class="admin-table-primary">${esc(product.name)}</strong>${product.isSecondHand === true ? `<span class="condition-badge admin-condition-badge">Second hand · ${esc(conditionGradeLabel(product.conditionGrade))}</span>${product.conditionNotes ? `<small class="admin-table-subtext">${esc(product.conditionNotes)}</small>` : ''}` : ''}${variantSummary}</td>
       <td><span class="admin-table-description" title="${esc(product.description||'')}">${esc(product.description||'—')}</span></td>
       <td>${esc(product.category||product.categorySlug||'Uncategorized')}</td>
       <td class="admin-table-price">${fmt(product.price)}</td>
@@ -285,6 +391,7 @@ async function loadProducts(requestedPage = adminProductPage) {
   adminProductPage = resultPage || page;
   adminProductTotal = Number(total || 0);
   adminProductTotalPages = Number(totalPages || 1);
+  setSidebarBadge('sidebarProductCount', adminProductTotal, false, adminProductTotal === 1 ? 'product' : 'products');
   adminCategories = categories;
   const select = $('#adminCategorySelect');
   if (select) select.innerHTML = categories.filter(c => c.active !== false).map(c => `<option value="${esc(c.slug)}">${esc(c.name)}</option>`).join('');
@@ -351,6 +458,7 @@ async function uploadProductPhoto(fileList, productId = '') {
 }
 
 document.addEventListener('change', (event) => {
+  if (event.target.matches('#createProduct [name="isSecondHand"]')) updateSecondHandFields();
   if (event.target.id === 'productImageFile') {
     const input = event.target;
     const upload = uploadProductPhoto(input.files);
@@ -404,6 +512,9 @@ function openProductEditor(productId = '') {
   form.elements.namedItem('categorySlug').value = product?.categorySlug || adminCategories.find(category => category.active !== false)?.slug || '';
   form.elements.namedItem('featured').checked = product?.featured === true;
   form.elements.namedItem('isSecondHand').checked = product?.isSecondHand === true;
+  form.elements.namedItem('conditionGrade').value = product?.conditionGrade || '';
+  form.elements.namedItem('conditionNotes').value = product?.conditionNotes || '';
+  updateSecondHandFields();
   renderProductVariantRows(product?.variants || []);
   const gallery = product ? adminImageGallery(product) : [];
   $('#productImageUrl').value = gallery[0]?.url || '';
@@ -419,6 +530,21 @@ function openProductEditor(productId = '') {
   $('#productImageFile').value = '';
   productImageUploadPromise = Promise.resolve();
   dialog.showModal();
+}
+
+function conditionGradeLabel(value) {
+  return ({ 'like-new': 'Like new', good: 'Good', fair: 'Fair', 'for-parts': 'For parts or repair' })[value] || 'Grade not set';
+}
+
+function updateSecondHandFields() {
+  const form = $('#createProduct');
+  const enabled = form?.elements.namedItem('isSecondHand')?.checked === true;
+  const section = $('#secondHandDetails');
+  const grade = form?.elements.namedItem('conditionGrade');
+  const notes = form?.elements.namedItem('conditionNotes');
+  if (section) section.hidden = !enabled;
+  if (grade) { grade.disabled = !enabled; grade.required = enabled; }
+  if (notes) notes.disabled = !enabled;
 }
 
 function newVariantId() {
@@ -505,6 +631,8 @@ $('#categoryImageFile')?.addEventListener('change', event => {
 async function loadCategories() {
   const {categories} = await api('/admin/categories');
   adminCategories = categories;
+  const activeCategoryCount = categories.filter(category => category.active !== false).length;
+  setSidebarBadge('sidebarCategoryCount', activeCategoryCount, false, activeCategoryCount === 1 ? 'active category' : 'active categories');
   renderCategories();
   const select = $('#adminCategorySelect');
   if (select) select.innerHTML = categories.filter(c => c.active !== false).map(c => `<option value="${esc(c.slug)}">${esc(c.name)}</option>`).join('');
@@ -638,13 +766,15 @@ function applyStoreConfig(config) {
   if (phone)   { phone.textContent = number; phone.href = `tel:${dial}`; }
 }
 
-async function initAdmin() {
+async function initAdmin({ afterLogin = false } = {}) {
   const adminLockedEl   = $('#adminLocked');
   const adminContentEl  = $('#adminContent');
   if (!adminLockedEl || !adminContentEl) return;
   document.body.classList.add('admin-login-mode');
   try {
-    const {user} = await api('/me');
+    const {user} = await api('/me', {
+      headers: afterLogin ? { 'X-IwacuMall-Auth-Check': 'post-login' } : {},
+    });
     if (user.role !== 'ADMIN') throw Error('Administrator access required');
     adminLockedEl.hidden = true;
     adminMfaEnabled = Boolean(user.mfaEnabled);
@@ -656,9 +786,9 @@ async function initAdmin() {
     if (mfaButton) mfaButton.textContent = adminMfaEnabled
       ? 'Replace authenticator and recovery codes'
       : 'Set up authenticator';
-    $('#adminGreeting').textContent = user.name.split(' ')[0];
     adminContentEl.hidden = false;
     document.body.classList.remove('admin-login-mode');
+    initializeAdminSidebar(user);
     const results = await Promise.all([
       loadStats(), loadAdminOrders(), loadProducts(), loadCategories(),
       loadPaymentMethods(),
@@ -667,7 +797,7 @@ async function initAdmin() {
       loadEmailOutbox(),
     ]);
     applyStoreConfig(results[6]);
-  } catch {
+  } catch (error) {
     document.body.classList.add('admin-login-mode');
     adminContentEl.hidden = true;
     adminLockedEl.hidden = false;
@@ -676,6 +806,7 @@ async function initAdmin() {
       loginError.textContent = '';
       loginError.hidden = true;
     }
+    if (afterLogin) throw error;
   }
 }
 
@@ -692,7 +823,11 @@ async function loginAdmin(form) {
     const payload = Object.fromEntries(new FormData(form));
     payload.email = String(payload.email || '').trim();
     payload.totpCode = String(payload.totpCode || '').trim().toUpperCase();
-    const result = await api('/auth/login', { method: 'POST', body: JSON.stringify(payload) });
+    const result = await api('/auth/login', {
+      method: 'POST',
+      headers: { 'X-IwacuMall-Login-Surface': 'admin' },
+      body: JSON.stringify(payload),
+    });
     if (result.mfaRequired) {
       if (mfaField) mfaField.hidden = false;
       if (mfaInput) { mfaInput.required = true; mfaInput.focus(); }
@@ -708,10 +843,11 @@ async function loginAdmin(form) {
     form.reset();
     if (mfaField) mfaField.hidden = true;
     if (mfaInput) mfaInput.required = false;
-    await initAdmin();
+    await initAdmin({ afterLogin: true });
   } catch (loginError) {
     if (error) {
-      error.textContent = loginError.message || 'Administrator sign-in failed. Please try again.';
+      const reference = loginError.requestId ? ` (reference ${loginError.requestId})` : '';
+      error.textContent = `${loginError.message || 'Administrator sign-in failed. Please try again.'}${reference}`;
       error.hidden = false;
     }
   } finally {
@@ -721,10 +857,46 @@ async function loginAdmin(form) {
 
 // ─── Event handlers ───────────────────────────────────────────────────────────
 
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && document.body.classList.contains('admin-drawer-open')) {
+    closeAdminSidebarDrawer();
+    return;
+  }
+  const currentTab = event.target.closest?.('#adminNav [role="tab"][data-tab]');
+  if (!currentTab) return;
+  const tabs = [...document.querySelectorAll('#adminNav [role="tab"][data-tab]')];
+  const currentIndex = tabs.indexOf(currentTab);
+  let nextIndex = currentIndex;
+  if (event.key === 'ArrowDown' || event.key === 'ArrowRight') nextIndex = (currentIndex + 1) % tabs.length;
+  else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+  else if (event.key === 'Home') nextIndex = 0;
+  else if (event.key === 'End') nextIndex = tabs.length - 1;
+  else return;
+  event.preventDefault();
+  activateAdminTab(tabs[nextIndex].dataset.tab, { updateHistory: true, closeDrawer: false, focus: true });
+});
+
 document.addEventListener('click', async (event) => {
   const button = event.target.closest('button,a[data-cancel-order]');
   if (!button) return;
   try {
+    if (button.id === 'adminSidebarToggle') {
+      setAdminSidebarDrawer(!document.body.classList.contains('admin-drawer-open'));
+      return;
+    }
+    if (button.id === 'adminSidebarOverlay') {
+      closeAdminSidebarDrawer();
+      return;
+    }
+    if (button.id === 'adminSidebarCollapse') {
+      const collapsed = !document.body.classList.contains('admin-sidebar-collapsed');
+      document.body.classList.toggle('admin-sidebar-collapsed', collapsed);
+      button.setAttribute('aria-expanded', String(!collapsed));
+      button.setAttribute('aria-label', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+      button.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
+      try { localStorage.setItem('iwm_admin_sidebar_collapsed', String(collapsed)); } catch {}
+      return;
+    }
     if (button.hasAttribute('data-open-product-dialog')) { openProductEditor(); return; }
     if (button.hasAttribute('data-open-category-dialog')) { openCategoryEditor(); return; }
     if (button.hasAttribute('data-close-dialog')) { button.closest('dialog')?.close(); return; }
@@ -796,8 +968,7 @@ document.addEventListener('click', async (event) => {
       return;
     }
     if (button.dataset.tab) {
-      document.querySelectorAll('[data-tab]').forEach(el => el.classList.toggle('active', el===button));
-      document.querySelectorAll('.admin-panel').forEach(el => el.classList.toggle('active', el.id===`panel-${button.dataset.tab}`));
+      activateAdminTab(button.dataset.tab, { updateHistory: true });
       return;
     }
     if (button.id === 'refreshOrders') { await loadAdminOrders(); notify('Orders refreshed'); return; }
@@ -1050,6 +1221,8 @@ document.addEventListener('submit', async (event) => {
       payload.isSecondHand = !!form.elements.namedItem('isSecondHand').checked;
       payload.images = JSON.parse(payload.images || '[]');
       payload.variants = JSON.parse(payload.variants || '[]');
+      if (!productId && payload.description.trim().length < 30) throw new Error('Add a helpful product description of at least 30 characters before listing it.');
+      if (!productId && payload.images.length === 0) throw new Error('Upload at least one product photo before listing it.');
       const result = productId
         ? await api(`/admin/products/${productId}`,{method:'PATCH',body:JSON.stringify(payload)})
         : await api('/admin/products',{method:'POST',body:JSON.stringify(payload)});
@@ -1109,7 +1282,7 @@ function renderCustomerOrders() {
     const items = (order.items || []).map(item => {
       const lineTotal = Number(item.unitPrice ?? item.unit_price ?? item.price ?? 0) * Number(item.quantity || 0);
       const variant = item.variantValue || item.variantLabel || item.variant?.value || '';
-      return `<li><div><strong>${esc(item.productName || item.product_name)}</strong>${variant ? `<small>${esc(item.variantType || item.variant?.type || 'Option')}: ${esc(variant)}</small>` : ''}${item.isSecondHand ? '<span class="condition-badge">Pre-owned</span>' : ''}</div><span>${Number(item.quantity)} × ${fmt(item.unitPrice ?? item.unit_price ?? item.price ?? 0)}</span><strong>${fmt(lineTotal)}</strong></li>`;
+      return `<li><div><strong>${esc(item.productName || item.product_name)}</strong>${variant ? `<small>${esc(item.variantType || item.variant?.type || 'Option')}: ${esc(variant)}</small>` : ''}${item.isSecondHand ? `<span class="condition-badge">Second hand · ${esc(conditionGradeLabel(item.conditionGrade))}</span>${item.conditionNotes ? `<small>${esc(item.conditionNotes)}</small>` : ''}` : ''}</div><span>${Number(item.quantity)} × ${fmt(item.unitPrice ?? item.unit_price ?? item.price ?? 0)}</span><strong>${fmt(lineTotal)}</strong></li>`;
     }).join('');
     const returnRequests = (order.returnRequests || []).map(request => `<div class="customer-return-status"><strong>Return ${esc(String(request.status || 'REQUESTED').replaceAll('_',' ').toLowerCase())}</strong><small>${esc(formatDate(request.requestedAt))} · ${esc(request.reason)}</small>${request.reviewNote ? `<p>${esc(request.reviewNote)}</p>` : ''}<ul>${(request.items || []).map(item => `<li>${esc(item.productName)} × ${Number(item.quantity)}${request.status === 'RECEIVED' ? ` · received ${Number(item.returnedQuantity || 0)}` : ''}</li>`).join('')}</ul></div>`).join('');
     const returnPolicy = order.returnPolicy || {};

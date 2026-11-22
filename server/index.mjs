@@ -63,6 +63,41 @@ function fail(status, message) {
 }
 function ensure(condition, code, message) { if (!condition) fail(code, message); }
 
+function safeAuthLogField(value, maxLength = 240) {
+  return String(value ?? '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/mongodb(?:\+srv)?:\/\/[^\s"'`]+/gi, '[MongoDB URI redacted]')
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[email redacted]')
+    .replace(/\b(password|passwd|secret|token|cookie|authorization|idToken)\b(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;]+)/gi, '$1$2[redacted]')
+    .replace(/\s+/g, ' ')
+    .slice(0, maxLength);
+}
+
+function logAuthFailure(req, route, error, status) {
+  const event = route === '/api/auth/register' ? 'registration_failure'
+    : route === '/api/auth/google' ? 'google_login_failure'
+      : route === '/api/me' ? 'post_login_session_failure' : 'login_failure';
+  const details = {
+    request_id: req.requestId,
+    route,
+    stage: safeAuthLogField(req.authStage || 'request_validation', 80),
+    status,
+    code: safeAuthLogField(req.authDiagnostic || error?.code || error?.name || 'AUTH_ERROR', 80),
+    reason: safeAuthLogField(req.authDiagnostic ? error?.message : error?.message || 'Authentication failed'),
+  };
+  console.warn(`[auth] ${event} ${JSON.stringify(details)}`);
+}
+
+function logAuthSuccess(req, route, role) {
+  const event = route === '/api/auth/register' ? 'registration_success' : 'login_success';
+  console.info(`[auth] ${event} ${JSON.stringify({
+    request_id: req.requestId,
+    route,
+    role: safeAuthLogField(role, 24),
+    client: req.headers['x-iwacumall-client'] === 'mobile' ? 'mobile' : 'browser',
+  })}`);
+}
+
 async function bodyJson(req, maxBytes = 64 * 1024) {
   let raw = '';
   for await (const chunk of req) {
@@ -152,8 +187,8 @@ async function authUser(req, adminRequired = false) {
 
 async function sanitizeProduct(input, partial = false, existing = null) {
   const fields = {};
-  for (const k of ['name', 'description', 'imageUrl', 'imagePublicId']) {
-    if (input[k] !== undefined) fields[k] = cleanText(input[k], k === 'description' ? 1200 : 200);
+  for (const k of ['name', 'description', 'imageUrl', 'imagePublicId', 'conditionGrade', 'conditionNotes']) {
+    if (input[k] !== undefined) fields[k] = cleanText(input[k], k === 'description' ? 1200 : k === 'conditionNotes' ? 500 : 200);
   }
   for (const k of ['price']) {
     if (input[k] !== undefined) {
@@ -230,10 +265,26 @@ async function sanitizeProduct(input, partial = false, existing = null) {
   }
   if (!partial) {
     ensure(fields.name && fields.price !== undefined, 400, 'Name and price are required');
+    if (config.isProduction) {
+      ensure((fields.description || '').trim().length >= 30, 400, 'Add a helpful product description of at least 30 characters before listing it.');
+      ensure(Array.isArray(fields.images) && fields.images.length > 0, 400, 'Add at least one product photo before listing it.');
+    }
     // New products use the admin's Available toggle instead of stock counts.
     fields.stock = 0;
     fields.trackInventory = false;
     fields.isSecondHand = fields.isSecondHand === true;
+  }
+  const isSecondHand = fields.isSecondHand ?? (existing?.isSecondHand === true);
+  if (!partial || input.isSecondHand !== undefined || input.conditionGrade !== undefined || input.conditionNotes !== undefined) {
+    if (isSecondHand) {
+      const grade = fields.conditionGrade ?? existing?.conditionGrade ?? '';
+      ensure(['like-new', 'good', 'fair', 'for-parts'].includes(grade), 400, 'Choose a valid second hand condition grade.');
+      fields.conditionGrade = grade;
+      fields.conditionNotes = fields.conditionNotes ?? cleanText(existing?.conditionNotes || '', 500);
+    } else {
+      fields.conditionGrade = '';
+      fields.conditionNotes = '';
+    }
   }
   if (input.categorySlug !== undefined) {
     const cat = await categories.findBySlug(slugify(cleanText(input.categorySlug, 80)));
@@ -400,16 +451,20 @@ async function api(req, res, url) {
 
   // ── Auth: register ─────────────────────────────────────────────────────────
   if (path === '/api/auth/register' && method === 'POST') {
+    req.authStage = 'rate_limit';
     await rateLimit(ip, 'register', config.rateLimitMaxRegister, config.rateLimitWindowMs);
+    req.authStage = 'request_body';
     const b        = await bodyJson(req);
     const name     = cleanText(b.name, 100);
     const email    = cleanText(b.email, 254).toLowerCase();
     const password = b.password;
+    req.authStage = 'credential_validation';
     ensure(
       name.length >= 2 && validEmail(email) &&
       typeof password === 'string' && password.length >= 10 && password.length <= 128,
       400, 'Provide name, valid email, and password of 10–128 characters'
     );
+    req.authStage = 'account_lookup';
     const existing = await users.findByEmail(email);
     ensure(!existing, 409, 'Email already registered');
     const id   = randomUUID();
@@ -420,6 +475,7 @@ async function api(req, res, url) {
     let user;
 
     try {
+      req.authStage = 'account_creation';
       if (config.emailVerificationRequired) {
         await withDbTransaction(async session => {
           user = await users.create(userFields, session);
@@ -438,8 +494,10 @@ async function api(req, res, url) {
       throw error;
     }
 
+    req.authStage = 'session_creation';
     const { token, expiresAt } = await createSession(id);
     setSessionCookie(res, token, config.sessionTtlSeconds);
+    logAuthSuccess(req, path, 'CUSTOMER');
     return json(res, 201, {
       token,
       user:  { id, name, email: user.email, role: 'CUSTOMER', emailVerified: user.emailVerified },
@@ -449,15 +507,26 @@ async function api(req, res, url) {
 
   // ── Auth: login ────────────────────────────────────────────────────────────
   if (path === '/api/auth/login' && method === 'POST') {
+    req.authStage = 'rate_limit';
     await rateLimit(ip, 'login', config.rateLimitMaxLogin, config.rateLimitWindowMs);
+    req.authStage = 'request_body';
     const b        = await bodyJson(req);
     const email    = cleanText(b.email, 254).toLowerCase();
     const password = b.password;
+    req.authStage = 'credential_validation';
     ensure(validEmail(email) && typeof password === 'string' && password.length <= 128, 400, 'Invalid credentials');
+    req.authStage = 'account_lookup';
     const user = await users.findByEmail(email);
+    req.authStage = 'password_verification';
     ensure(user && verifyPassword(password, user.passwordHash), 401, 'Invalid email or password');
+    if (req.headers['x-iwacumall-login-surface'] === 'admin') {
+      req.authStage = 'admin_role_verification';
+      ensure(user.role === 'ADMIN', 403, 'This account does not have administrator access.');
+    }
     if (user.role === 'ADMIN' && user.mfaEnabled) {
+      req.authStage = 'mfa_challenge';
       if (!b.totpCode) return json(res, 200, { mfaRequired: true });
+      req.authStage = 'mfa_verification';
       const record = await adminMfa.find(user.id);
       let secret = '';
       try { secret = decryptTotpSecret(record?.secret); } catch {}
@@ -465,8 +534,10 @@ async function api(req, res, url) {
       const validRecoveryCode = !validTotp && await adminMfa.consumeRecoveryCode(user.id, hashRecoveryCode(b.totpCode));
       ensure(validTotp || validRecoveryCode, 401, 'Authenticator or recovery code is invalid');
     }
+    req.authStage = 'session_creation';
     const { token } = await createSession(user.id);
     setSessionCookie(res, token, config.sessionTtlSeconds);
+    logAuthSuccess(req, path, user.role);
     return json(res, 200, {
       ...(req.headers['x-iwacumall-client'] === 'mobile' ? { token } : {}),
       user: { id: user.id, name: user.name, email: user.email, role: user.role, emailVerified: user.emailVerified, googleLinked: !!user.googleSub, mfaEnabled: !!user.mfaEnabled },
@@ -475,30 +546,41 @@ async function api(req, res, url) {
 
   // ── Auth: Google ID token (web and native clients) ─────────────────────────
   if (path === '/api/auth/google' && method === 'POST') {
+    req.authStage = 'rate_limit';
     await rateLimit(ip, 'google-login', config.rateLimitMaxLogin, config.rateLimitWindowMs);
+    req.authStage = 'csrf_verification';
     if (/(?:^|;\s*)iwm_session=/.test(req.headers.cookie || '')) verifyCsrf(req);
+    req.authStage = 'google_configuration';
     ensure(config.googleClientIds.length > 0, 503, 'Google sign-in is not configured yet.');
+    req.authStage = 'request_body';
     const b = await bodyJson(req);
+    req.authStage = 'google_credential_validation';
     ensure(typeof b.idToken === 'string' && b.idToken.length > 20 && b.idToken.length <= 8192, 400, 'Google credential is required.');
 
     let profile;
     try {
+      req.authStage = 'google_token_verification';
       profile = await verifyGoogleIdToken(b.idToken, config.googleClientIds);
-    } catch {
+    } catch (error) {
+      req.authDiagnostic = error?.code || error?.name || 'GOOGLE_TOKEN_REJECTED';
       fail(401, 'Google sign-in could not be verified. Please try again.');
     }
 
+    req.authStage = 'google_account_lookup';
     let user = await users.findByGoogleSub(profile.googleSub);
     if (!user) {
+      req.authStage = 'google_email_lookup';
       const existing = await users.findByEmail(profile.email);
       if (existing) {
         ensure(existing.role === 'CUSTOMER', 403, 'Administrator accounts must use administrator sign-in.');
         ensure(existing.emailVerified === true, 409, 'Sign in and verify this email before linking Google to the existing account.');
         ensure(!existing.googleSub || existing.googleSub === profile.googleSub, 409, 'This email is linked to a different Google account.');
+        req.authStage = 'google_account_linking';
         user = await users.linkGoogleIdentity(existing.id, profile.googleSub);
         ensure(user, 409, 'This account was updated during sign-in. Please try again.');
       } else {
         try {
+          req.authStage = 'google_account_creation';
           user = await users.create({
             id: randomUUID(), name: cleanText(profile.name, 100) || profile.email.split('@')[0],
             email: profile.email, emailVerified: true, googleSub: profile.googleSub,
@@ -516,10 +598,13 @@ async function api(req, res, url) {
         }
       }
     }
+    req.authStage = 'role_verification';
     ensure(user.role === 'CUSTOMER', 403, 'Administrator accounts must use administrator sign-in.');
 
+    req.authStage = 'session_creation';
     const { token } = await createSession(user.id);
     setSessionCookie(res, token, config.sessionTtlSeconds);
+    logAuthSuccess(req, path, user.role);
     return json(res, 200, {
       ...(req.headers['x-iwacumall-client'] === 'mobile' ? { token } : {}),
       user: { id: user.id, name: user.name, email: user.email, role: user.role, emailVerified: !!user.emailVerified, googleLinked: !!user.googleSub, mfaEnabled: !!user.mfaEnabled },
@@ -639,6 +724,7 @@ async function api(req, res, url) {
 
   // ── Me ─────────────────────────────────────────────────────────────────────
   if (path === '/api/me' && method === 'GET') {
+    if (req.headers['x-iwacumall-auth-check'] === 'post-login') req.authStage = 'post_login_session_validation';
     const user = await authUser(req);
     return json(res, 200, {
       user: { id: user.id, name: user.name, email: user.email, role: user.role, emailVerified: user.emailVerified, googleLinked: !!user.googleSub, mfaEnabled: !!user.mfaEnabled }
@@ -860,6 +946,8 @@ async function api(req, res, url) {
         quantity,
         trackInventory: p.trackInventory === true,
         isSecondHand: p.isSecondHand === true,
+        conditionGrade: p.isSecondHand === true ? (p.conditionGrade || '') : '',
+        conditionNotes: p.isSecondHand === true ? (p.conditionNotes || '') : '',
       });
     }
 
@@ -1556,7 +1644,7 @@ async function serveStatic(req, res, url) {
       __PRODUCT_CANONICAL__: escapeHtml(canonical),
       __PRODUCT_IMAGE__: escapeHtml(imageUrl),
       __PRODUCT_CATEGORY__: escapeHtml(product.category || product.categorySlug || 'Everyday Essentials'),
-      __PRODUCT_CONDITION_BADGE__: product.isSecondHand === true ? 'Pre-owned · previously owned' : '',
+      __PRODUCT_CONDITION_BADGE__: product.isSecondHand === true ? 'Second hand' : '',
       __PRODUCT_PRICE__: Number(product.price || 0).toLocaleString('en-US'),
       __PRODUCT_STOCK_CLASS__: product.trackInventory === true && product.stock <= 0 ? 'stock-out' : 'stock-in',
       __PRODUCT_STOCK__: product.trackInventory === true ? product.stock > 0 ? `In stock (${product.stock} available)` : 'Out of stock' : 'Available',
@@ -1653,8 +1741,13 @@ async function serveStatic(req, res, url) {
 // ─── HTTP server ──────────────────────────────────────────────────────────────
 
 export const server = http.createServer(async (req, res) => {
+  const requestId = randomUUID();
+  let requestPath = '';
+  req.requestId = requestId;
+  res.setHeader('X-Request-ID', requestId);
   try {
     const url    = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    requestPath = url.pathname;
     const origin = req.headers.origin;
 
     // CORS
@@ -1662,12 +1755,13 @@ export const server = http.createServer(async (req, res) => {
       config.corsOrigins.includes(origin) ||
       new URL(origin).host === req.headers.host;
     if (origin && !trustedOrigin && url.pathname.startsWith('/api')) {
-      return json(res, 403, { error: 'Origin not allowed' });
+      fail(403, 'Origin not allowed');
     }
     if (origin && trustedOrigin) {
       res.setHeader('Access-Control-Allow-Origin',  origin);
       res.setHeader('Vary', 'Origin');
-      res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-CSRF-Token');
+      res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-CSRF-Token, X-IwacuMall-Login-Surface, X-IwacuMall-Auth-Check');
+      res.setHeader('Access-Control-Expose-Headers', 'X-Request-ID');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
       res.setHeader('Access-Control-Allow-Credentials', 'true');
     }
@@ -1677,8 +1771,17 @@ export const server = http.createServer(async (req, res) => {
     return await serveStatic(req, res, url);
   } catch (e) {
     const status = Number(e?.status) || 500;
-    if (status === 500) console.error('[server]', e.message, e.stack?.split('\n').slice(0,3).join(' | '));
-    if (!res.headersSent) json(res, status, { error: status === 500 ? 'Unexpected server error' : e.message });
+    const authRoute = ['/api/auth/login', '/api/auth/google', '/api/auth/register'].includes(requestPath) ||
+      (requestPath === '/api/me' && req.headers['x-iwacumall-auth-check'] === 'post-login');
+    if (authRoute) {
+      logAuthFailure(req, requestPath, e, status);
+    } else if (status === 500) {
+      console.error('[server]', e.message, e.stack?.split('\n').slice(0,3).join(' | '));
+    }
+    if (!res.headersSent) json(res, status, {
+      error: status === 500 ? 'Unexpected server error' : e.message,
+      ...(authRoute ? { requestId } : {}),
+    });
   }
 });
 

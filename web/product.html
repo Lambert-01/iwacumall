@@ -14,7 +14,7 @@
   <title>__PRODUCT_NAME__ | IwacuMall</title>
   <link rel="icon" href="/assets/favicon.png">
   <link rel="stylesheet" href="/styles.css">
-  <link rel="stylesheet" href="/overrides.css?v=variant-condition-repair-20261114">
+  <link rel="stylesheet" href="/overrides.css?v=condition-gallery-checkout-20261123">
   <style>
     .product-detail-layout {
       display: grid;
@@ -45,6 +45,13 @@
       object-fit: contain;
       border-radius: 12px;
     }
+    .product-detail-thumbnails { display: flex; justify-content: center; gap: 9px; flex-wrap: wrap; margin-top: 16px; }
+    .product-detail-thumbnail { width: 64px; height: 64px; padding: 4px; border: 1px solid #e1e8f3; border-radius: 12px; background: #fff; cursor: pointer; }
+    .product-detail-thumbnail.is-active { border: 2px solid #1455d9; box-shadow: 0 0 0 3px #1455d916; }
+    .product-detail-thumbnail img { display: block; width: 100%; height: 100%; object-fit: contain; }
+    .product-condition-details { margin: 0 0 20px; padding: 14px 16px; border: 1px solid #f0dfb8; border-radius: 14px; background: #fffaf0; color: #634819; }
+    .product-condition-details strong { display: block; margin-bottom: 5px; font-size: 13px; }
+    .product-condition-details p { margin: 0; color: #765a2b; font-size: 13px; line-height: 1.55; white-space: pre-wrap; }
     .product-detail-info {
       background: #fff;
       border-radius: 20px;
@@ -142,7 +149,8 @@
     <div id="productLoading" style="display:none;text-align:center;padding:60px 0;color:#718096;">Loading product details…</div>
     <div id="productContainer" class="product-detail-layout">
       <div class="product-detail-img-box">
-        <img id="productImage" src="__PRODUCT_IMAGE__" alt="__PRODUCT_NAME__">
+        <img id="productImage" src="__PRODUCT_IMAGE__" alt="__PRODUCT_NAME__" onerror="this.src='/assets/products/fallback.png'">
+        <div id="productImageThumbnails" class="product-detail-thumbnails" role="group" aria-label="Product photos" hidden></div>
       </div>
       <div class="product-detail-info">
         <div id="productCategory" class="product-detail-cat">__PRODUCT_CATEGORY__</div>
@@ -151,6 +159,7 @@
         <div id="productPrice" class="product-detail-price">RWF __PRODUCT_PRICE__</div>
         <div id="productStockBadge" class="product-detail-stock __PRODUCT_STOCK_CLASS__">__PRODUCT_STOCK__</div>
         <p id="productDescription" class="product-detail-desc">__PRODUCT_DESCRIPTION__</p>
+        <section id="productConditionDetails" class="product-condition-details" hidden><strong id="productConditionGrade"></strong><p id="productConditionNotes"></p></section>
 
         <section id="productVariantSection" class="product-detail-variants" aria-labelledby="productVariantsHeading" hidden>
           <h2 id="productVariantsHeading">Choose your option</h2>
@@ -177,6 +186,6 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script type="module" src="/product.js?v=variant-condition-repair-20261114"></script>
+  <script type="module" src="/product.js?v=condition-gallery-checkout-20261123"></script>
 </body>
 </html>

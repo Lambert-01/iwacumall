@@ -4,6 +4,33 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, character => ({'&':
 let currentProduct = null;
 let selectedQty = 1;
 let selectedVariantId = '';
+let selectedImageIndex = 0;
+
+function conditionGradeLabel(value) {
+  return ({ 'like-new': 'Like new', good: 'Good', fair: 'Fair', 'for-parts': 'For parts or repair' })[value] || 'Grade not set';
+}
+
+function productImages() {
+  const gallery = Array.isArray(currentProduct?.images)
+    ? currentProduct.images.filter(image => image && typeof image.url === 'string' && image.url)
+    : [];
+  return gallery.length ? gallery : [{ url: currentProduct?.imageUrl || '/assets/products/fallback.png' }];
+}
+
+function renderProductGallery() {
+  const images = productImages();
+  selectedImageIndex = Math.min(selectedImageIndex, images.length - 1);
+  const current = images[selectedImageIndex];
+  const main = $('#productImage');
+  main.src = current.url;
+  main.alt = `${currentProduct.name} · photo ${selectedImageIndex + 1} of ${images.length}`;
+  const thumbnails = $('#productImageThumbnails');
+  thumbnails.hidden = images.length < 2;
+  thumbnails.innerHTML = images.length < 2 ? '' : images.map((image, index) => `
+    <button class="product-detail-thumbnail ${index === selectedImageIndex ? 'is-active' : ''}" type="button" data-product-image="${index}" aria-label="View photo ${index + 1} of ${images.length}" aria-pressed="${index === selectedImageIndex}">
+      <img src="${esc(image.url)}" alt="" loading="lazy" onerror="this.src='/assets/products/fallback.png'">
+    </button>`).join('');
+}
 
 function toast(message) {
   const element = $('#toast');
@@ -47,12 +74,15 @@ function render() {
   $('#productLoading').style.display = 'none';
   $('#productContainer').style.display = 'grid';
   document.title = `${currentProduct.name} | IwacuMall`;
-  $('#productImage').src = currentProduct.imageUrl || '/assets/products/fallback.png';
-  $('#productImage').alt = currentProduct.name;
+  renderProductGallery();
   $('#productCategory').textContent = currentProduct.category || currentProduct.categorySlug || 'Everyday Essentials';
   $('#productTitle').textContent = currentProduct.name;
   $('#productConditionBadge').hidden = currentProduct.isSecondHand !== true;
-  $('#productConditionBadge').textContent = currentProduct.isSecondHand === true ? 'Pre-owned · previously owned' : '';
+  $('#productConditionBadge').textContent = currentProduct.isSecondHand === true ? 'Second hand' : '';
+  const conditionDetails = $('#productConditionDetails');
+  conditionDetails.hidden = currentProduct.isSecondHand !== true;
+  $('#productConditionGrade').textContent = `Condition: ${conditionGradeLabel(currentProduct.conditionGrade)}`;
+  $('#productConditionNotes').textContent = currentProduct.conditionNotes || 'No additional condition notes were provided.';
   $('#productDescription').textContent = currentProduct.description || 'Quality product available at IwacuMall.';
   const allVariants = variants();
   const variantSection = $('#productVariantSection');
@@ -92,6 +122,7 @@ async function load() {
     const data = await response.json();
     currentProduct = data.product;
     selectedVariantId = '';
+    selectedImageIndex = 0;
     render();
   } catch {
     $('#productLoading').style.display = 'none';
@@ -99,6 +130,15 @@ async function load() {
     $('#productError').style.display = 'block';
   }
 }
+
+$('#productImageThumbnails').addEventListener('click', event => {
+  const button = event.target.closest('[data-product-image]');
+  if (!button || !currentProduct) return;
+  const index = Number(button.dataset.productImage);
+  if (!Number.isInteger(index) || !productImages()[index]) return;
+  selectedImageIndex = index;
+  renderProductGallery();
+});
 
 $('#productVariantList').addEventListener('change', event => {
   const input = event.target.closest('input[name="productVariant"]');

@@ -729,6 +729,8 @@ export const orders = {
             unitPrice:   i.unitPrice,
             quantity:    i.quantity,
             isSecondHand: i.isSecondHand === true,
+            conditionGrade: i.conditionGrade || '',
+            conditionNotes: i.conditionNotes || '',
             stockReserved: reservedLines.has(`${i.productId}\u0000${i.variantId || ''}`),
           })),
           subtotal,

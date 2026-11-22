@@ -1,6 +1,6 @@
 # IwacuMall implementation status
 
-Last updated: 14 November 2026. This is a source review, not a production certification. Based on owner-provided VPS output, DNS, HTTPS, the systemd service, API health, and MongoDB Atlas connectivity are configured and responding. Public customer workflows, OAuth, real SMTP delivery, and production operations have not all been end-to-end verified.
+Last updated: 23 November 2026. This is a source review, not a production certification. Based on owner-provided VPS output, DNS, HTTPS, the systemd service, API health, and MongoDB Atlas connectivity are configured and responding. Public customer workflows, OAuth, real SMTP delivery, and production operations have not all been end-to-end verified.
 
 ## Implemented in source
 
@@ -13,12 +13,15 @@ The isolated checks listed below cover only the cases named there; they are not 
 - The server generates authorized PDF invoice bytes. The durable email outbox delivers invoice attachments and queues payment, fulfillment, cancellation, expiry and refund updates for customers and the store. The admin includes delivery status and retry/resend actions.
 - Registration verification, verification resend, and password-reset emails use the retrying outbox. Token issuance and queue insertion commit together; link tokens are encrypted with the application secret while queued, redacted from admin responses, and purged after delivery, cancellation, or expiry.
 - The storefront has paginated server-side catalogue search/filtering, product detail pages with server-rendered metadata, category URLs, sitemap/robots routes, and a real 404 response.
+- Product detail pages now include a clickable gallery for all uploaded photos. Second-hand products must select a condition grade and can record condition notes; the grade/notes appear in the admin catalogue and order view, web and mobile product details, cart, web invoice, PDF invoice, and order email. Production product creation now requires a 30-character description and at least one photo; existing records can still be edited without an enforced migration.
+- Web checkout now loads saved customer addresses, selects the default (or first saved) address, and fills recipient, phone, city and street details; shoppers can choose another saved address or type a new one. Android already used saved addresses.
 - Web and Android product cards open responsive quick views with stock-aware quantity selection, live totals, add-to-cart and selectable product-gallery photos. The web refreshes product data and same-category suggestions from the API; Android shows same-category recommendations that open another quick view.
 - Google ID-token sign-in is wired for browser and Flutter clients, with server-side token verification, verified-email handling, customer-only account linking, session issuance and optional admin MFA. The web CSP allowlists Google Identity Services resources; production OAuth configuration and sign-in still need end-to-end verification.
 - Admins can upload up to eight PNG/JPG/WebP product photos to Cloudinary and replace a product gallery from the catalog editor. The API validates each photo and its Cloudinary ID, keeps the first photo as the backward-compatible primary image, rejects duplicate asset assignment, and attempts to clean up removed unreferenced assets. HTTPS image URLs and local catalog assets remain supported. Cloudinary account credentials are server-only.
 - Admin product editing now includes category rename/archive, category reassignment, low/out-of-stock filters, reasoned stock adjustments and inventory history.
 - Web and Android account settings include profile and saved-address management. Both surfaces expose session revocation, password change/reset and confirmed customer-account deletion with reauthentication; Android uses the default saved delivery address during checkout.
 - Admin orders and customer order history support server-side load-more pagination; admin order filters are sent to the server.
+- The admin sidebar groups sales, catalog and store controls; it supports a persistent desktop collapse, a mobile navigation drawer, keyboard-operable tabs, URL history, and live open-order / failed-email badges.
 - Android customers can fetch their authorized invoice PDF and open it in a PDF viewer or share it through Android's chooser. Web and PDF invoices display recorded refund totals.
 - Paid orders support transactionally recorded partial/full manual refunds with a required provider reference, reason, audit entry and net-revenue calculation. This is a refund ledger; it does not send money or change inventory.
 - Paid, delivered orders can request returns during the return window snapshotted at checkout. Admins can approve/reject requests, record returned and restockable quantities, and restock inspected items once inside the same transaction as receipt and audit records. Customer/store email events are queued. Cash refunds remain a separate manual process.
@@ -55,11 +58,13 @@ The PDF test verifies generated bytes and the `%PDF-` signature, not visual layo
 - Legacy Cloudinary URLs without a stored public ID cannot be cleaned up automatically. Cloudinary image transformations, crop presets and responsive thumbnail delivery are not configured.
 - The refund ledger records a refund already issued outside IwacuMall. There is no payment-provider refund API; staff must issue any approved refund through their payment provider and record its reference.
 - Real SMTP delivery and retry/recovery have not been exercised against a provider. Auth email tokens use `COOKIE_SECRET` encryption; drain or allow pending authentication-email jobs to expire before rotating that secret.
+- Product condition details are optional for legacy and existing second-hand listings until each listing is reviewed and updated. The production rule applies to new products only; it does not clean or infer the live catalogue.
 - Browser/accessibility checks, rendered PDF inspection, and physical-device testing remain. The Flutter source is still concentrated in `mobile/lib/main.dart`.
 
 ## Owner and production prerequisites
 
 - Replace demo catalogue content with approved products, prices, stock, licensed photos, and useful descriptions.
+- Review every existing second-hand product and enter its actual condition grade and any wear, missing parts, or repair details. Do not use a grade as a substitute for disclosing known defects.
 - Keep MongoDB Atlas access restricted, backups enabled, and a restore procedure verified.
 - Verify storefront and admin behavior over HTTPS after releases; keep monitoring and incident contacts current.
 - Verify real store notification email and SMTP delivery, including sender/domain DNS and test inbox delivery.

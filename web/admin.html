@@ -8,14 +8,17 @@
   <title>IwacuMall | Admin workspace</title>
   <link rel="icon" href="/assets/favicon.png">
   <link rel="stylesheet" href="/styles.css">
-  <link rel="stylesheet" href="/overrides.css?v=filters-pagination-compact-orders-20261114">
-  <script type="module" src="/dashboard.js?v=filters-pagination-compact-orders-20261114"></script>
+  <link rel="stylesheet" href="/overrides.css?v=auth-diagnostics-20261123">
+  <script type="module" src="/dashboard.js?v=auth-diagnostics-20261123"></script>
 </head>
 <body class="admin-body admin-login-mode" data-page="admin">
   <header class="admin-topbar">
     <a class="brand" href="/" aria-label="IwacuMall storefront">
       <img src="/assets/favicon.png" alt=""><span>Iwacu<span class="brand-accent">Mall</span></span>
     </a>
+    <button class="admin-sidebar-toggle" id="adminSidebarToggle" type="button" aria-label="Open admin navigation" aria-expanded="false" aria-controls="adminSidebar">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+    </button>
     <div class="admin-top-actions">
       <span class="admin-store-state"><i></i> Store workspace</span>
       <a class="btn btn-subtle" href="/">View storefront <span>↗</span></a>
@@ -23,24 +26,65 @@
     </div>
   </header>
 
+  <button class="admin-sidebar-overlay" id="adminSidebarOverlay" type="button" aria-label="Close admin navigation" hidden></button>
   <main class="admin-layout">
-    <aside class="admin-sidebar" aria-label="Admin navigation">
-      <div class="sidebar-caption">WORKSPACE</div>
-      <nav class="admin-nav">
-        <button class="active" data-tab="orders"><span>▤</span> Orders <b id="sidebarOrderCount"></b></button>
-        <button data-tab="email"><span>✉</span> Email delivery</button>
-        <button data-tab="products"><span>▦</span> Products</button>
-        <button data-tab="categories"><span>◈</span> Categories</button>
-        <button data-tab="settings"><span>⚙</span> Store settings</button>
-      </nav>
-      <div class="sidebar-spacer"></div>
-      <div class="sidebar-contact">
-        <span class="contact-mark">✦</span>
-        <strong>IwacuMall store</strong>
-        <span id="sidebarStoreAddress">Downtown Kigali</span>
-        <a id="sidebarStorePhone" href="tel:+250788651421">+250 788 651 421</a>
+    <aside class="admin-sidebar" id="adminSidebar" aria-label="Admin navigation">
+      <div class="admin-sidebar-heading">
+        <a class="admin-sidebar-brand" href="/admin" aria-label="IwacuMall admin home">
+          <img src="/assets/favicon.png" alt="">
+          <span><strong>IwacuMall</strong><small>ADMIN WORKSPACE</small></span>
+        </a>
+        <button class="admin-sidebar-collapse" id="adminSidebarCollapse" type="button" aria-label="Collapse sidebar" aria-expanded="true" title="Collapse sidebar">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 5-7 7 7 7"/></svg>
+        </button>
       </div>
-      <a class="sidebar-home" href="/">← Back to shop</a>
+
+      <div class="sidebar-identity">
+        <span class="sidebar-identity-mark"><img src="/assets/favicon.png" alt=""></span>
+        <span class="sidebar-identity-copy"><strong>Store operations</strong><small id="sidebarAdminName">Administrator</small></span>
+        <span class="sidebar-online-dot" title="Secure workspace"></span>
+      </div>
+
+      <nav class="admin-nav" id="adminNav" role="tablist" aria-label="Admin workspace sections" aria-orientation="vertical">
+        <div class="admin-nav-group">
+          <span class="admin-nav-group-title">OPERATIONS</span>
+          <button class="active" type="button" role="tab" id="adminTabOrders" data-tab="orders" aria-controls="panel-orders" aria-selected="true" tabindex="0" title="Orders">
+            <span class="admin-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 3.8h7l4 4V20H7z"/><path d="M14 4v4h4M10 12h5M10 16h5"/></svg></span>
+            <span class="admin-nav-copy"><strong>Orders</strong><small>Review and fulfill</small></span>
+            <b class="admin-nav-badge" id="sidebarOrderCount" hidden></b>
+          </button>
+          <button type="button" role="tab" id="adminTabEmail" data-tab="email" aria-controls="panel-email" aria-selected="false" tabindex="-1" title="Email delivery">
+            <span class="admin-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="m4.5 7 7.5 6 7.5-6"/></svg></span>
+            <span class="admin-nav-copy"><strong>Email delivery</strong><small>Invoices and notices</small></span>
+            <b class="admin-nav-badge is-alert" id="sidebarEmailCount" hidden></b>
+          </button>
+        </div>
+        <div class="admin-nav-group">
+          <span class="admin-nav-group-title">CATALOG</span>
+          <button type="button" role="tab" id="adminTabProducts" data-tab="products" aria-controls="panel-products" aria-selected="false" tabindex="-1" title="Products">
+            <span class="admin-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m12 3 8.5 4.5v9L12 21l-8.5-4.5v-9z"/><path d="m3.8 7.7 8.2 4.5 8.2-4.5M12 12.2V21M7.7 5.3l8.5 4.6"/></svg></span>
+            <span class="admin-nav-copy"><strong>Products</strong><small>Pricing and availability</small></span>
+            <b class="admin-nav-badge" id="sidebarProductCount" hidden></b>
+          </button>
+          <button type="button" role="tab" id="adminTabCategories" data-tab="categories" aria-controls="panel-categories" aria-selected="false" tabindex="-1" title="Categories">
+            <span class="admin-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1.4"/><rect x="14" y="4" width="6" height="6" rx="1.4"/><rect x="4" y="14" width="6" height="6" rx="1.4"/><rect x="14" y="14" width="6" height="6" rx="1.4"/></svg></span>
+            <span class="admin-nav-copy"><strong>Categories</strong><small>Organize the shop</small></span>
+            <b class="admin-nav-badge" id="sidebarCategoryCount" hidden></b>
+          </button>
+        </div>
+        <div class="admin-nav-group">
+          <span class="admin-nav-group-title">STORE</span>
+          <button type="button" role="tab" id="adminTabSettings" data-tab="settings" aria-controls="panel-settings" aria-selected="false" tabindex="-1" title="Store settings">
+            <span class="admin-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="m19.3 13.5 1.1.9-1.7 3-1.4-.6a7.8 7.8 0 0 1-1.5.9l-.2 1.5h-3.5l-.2-1.5a7.8 7.8 0 0 1-1.5-.9l-1.4.6-1.7-3 1.1-.9a7 7 0 0 1 0-1.8l-1.1-.9 1.7-3 1.4.6a7.8 7.8 0 0 1 1.5-.9l.2-1.5h3.5l.2 1.5a7.8 7.8 0 0 1 1.5.9l1.4-.6 1.7 3-1.1.9a7 7 0 0 1 0 1.8Z"/></svg></span>
+            <span class="admin-nav-copy"><strong>Store settings</strong><small>Payments and delivery</small></span>
+          </button>
+        </div>
+      </nav>
+      <div class="sidebar-contact">
+        <span class="contact-mark" aria-hidden="true">✦</span>
+        <span class="sidebar-contact-copy"><small>STORE CONTACT</small><strong>IwacuMall</strong><span id="sidebarStoreAddress">Downtown Kigali</span><a id="sidebarStorePhone" href="tel:+250788651421">+250 788 651 421</a></span>
+      </div>
+      <a class="sidebar-home" href="/"><span aria-hidden="true">↗</span><span>Open storefront</span></a>
     </aside>
 
     <section class="admin-main">
@@ -64,16 +108,16 @@
       <div id="adminContent" hidden>
         <div class="admin-page-heading">
           <div>
-            <div class="section-label">YOUR STORE, AT A GLANCE</div>
-            <h1>Good to see you, <span id="adminGreeting">Administrator</span></h1>
-            <p>Keep orders moving and your catalog up to date.</p>
+            <div class="section-label" id="adminPageKicker">OPERATIONS · SALES</div>
+            <h1 id="adminPageTitle">Orders and fulfillment</h1>
+            <p id="adminPageDescription">Review new purchases, confirm orders, and keep delivery moving.</p>
           </div>
-          <div class="admin-date-chip"><span>●</span> Store dashboard</div>
+          <div class="admin-date-chip" id="adminPagePill"><span>●</span> <span id="adminPagePillText">Order workspace</span></div>
         </div>
 
         <div class="stat-grid admin-stat-grid" id="statGrid" aria-live="polite"></div>
 
-        <section id="panel-orders" class="admin-panel active" aria-labelledby="ordersHeading">
+        <section id="panel-orders" class="admin-panel active" role="tabpanel" aria-labelledby="ordersHeading" tabindex="0">
           <div class="admin-section-head">
             <div><div class="section-label">FULFILLMENT</div><h2 id="ordersHeading">Customer orders</h2><p>Review each order and update its fulfillment status.</p></div>
             <button class="action-btn refresh-btn" id="refreshOrders"><span>↻</span> Refresh orders</button>
@@ -99,7 +143,7 @@
           </nav>
         </section>
 
-        <section id="panel-email" class="admin-panel" aria-labelledby="emailHeading">
+        <section id="panel-email" class="admin-panel" role="tabpanel" aria-labelledby="emailHeading" tabindex="0" hidden>
           <div class="admin-section-head">
             <div><div class="section-label">CUSTOMER NOTIFICATIONS</div><h2 id="emailHeading">Order email delivery</h2><p>Check invoice and order status emails to the customer and configured store inbox. SMTP delivery is retried automatically.</p></div>
             <button class="action-btn refresh-btn" id="refreshEmail"><span>↻</span> Refresh email status</button>
@@ -107,7 +151,7 @@
           <div id="emailOutboxJobs" class="panel" aria-live="polite"><div class="empty-state">Loading email jobs…</div></div>
         </section>
 
-        <section id="panel-products" class="admin-panel" aria-labelledby="productsHeading">
+        <section id="panel-products" class="admin-panel" role="tabpanel" aria-labelledby="productsHeading" tabindex="0" hidden>
           <div class="admin-section-head">
             <div><div class="section-label">CATALOG</div><h2 id="productsHeading">Products</h2><p>Manage product details, photos, pricing, options, and availability.</p></div>
             <button class="btn btn-primary" type="button" data-open-product-dialog>＋ Add product</button>
@@ -127,7 +171,7 @@
           </section>
         </section>
 
-        <section id="panel-categories" class="admin-panel" aria-labelledby="categoriesHeading">
+        <section id="panel-categories" class="admin-panel" role="tabpanel" aria-labelledby="categoriesHeading" tabindex="0" hidden>
           <div class="admin-section-head">
             <div><div class="section-label">SHOP ORGANIZATION</div><h2 id="categoriesHeading">Product categories</h2><p>Manage category names, descriptions, images, and catalog status.</p></div>
             <button class="btn btn-primary" type="button" data-open-category-dialog>＋ Add category</button>
@@ -140,7 +184,7 @@
           </section>
         </section>
 
-        <section id="panel-settings" class="admin-panel" aria-labelledby="settingsHeading">
+        <section id="panel-settings" class="admin-panel" role="tabpanel" aria-labelledby="settingsHeading" tabindex="0" hidden>
           <div class="admin-section-head">
             <div><div class="section-label">STORE CONFIGURATION</div><h2 id="settingsHeading">Store settings</h2><p>These values are used at checkout and printed on customer invoices.</p></div>
           </div>
@@ -215,19 +259,23 @@
       <label>Product name<input name="name" class="form-control" placeholder="e.g. Fresh mangoes" required maxlength="120"></label>
       <label id="productBasePriceLabel">Price (RWF)<input id="productBasePrice" name="price" type="number" class="form-control" min="0" step="1" required></label>
       <label>Category<select id="adminCategorySelect" name="categorySlug" class="form-control" required></select></label>
-      <label>Description<textarea class="form-control" name="description" rows="3" maxlength="1200" placeholder="A short description for shoppers"></textarea></label>
+      <label>Description<textarea class="form-control" name="description" rows="3" maxlength="1200" placeholder="Describe what it is, what is included, and useful details shoppers should know"></textarea><small>New listings need at least 30 characters. Clear descriptions and several useful photos help shoppers choose confidently.</small></label>
       <section class="product-variant-builder" aria-labelledby="productVariantsHeading">
         <div class="product-variant-builder-head"><div><h3 id="productVariantsHeading">Options and prices</h3><p>Add sizes, flavours, colours, or another option. Each option can have its own price.</p></div><button class="btn btn-subtle" id="addProductVariant" type="button">＋ Add option</button></div>
         <div id="productVariantRows" class="product-variant-rows" aria-live="polite"></div>
         <small class="product-variant-note">When options are added, shoppers choose one in the product popup. The storefront shows the lowest option price as “From”.</small>
         <input id="productVariants" type="hidden" name="variants" value="[]">
       </section>
-      <div class="admin-photo-picker"><label for="productImageFile">Product photos</label><input id="productImageFile" class="form-control" type="file" accept="image/png,image/jpeg,image/webp" multiple disabled><small>Select up to 8 PNG, JPG or WebP photos · up to 8 MB each. Selected photos upload to Cloudinary.</small><div class="admin-image-preview-row"><img id="productImagePreview" class="product-image-preview" alt="Product image preview" hidden><span id="productImageUploadStatus" class="image-upload-status" role="status" aria-live="polite"></span></div></div>
+      <div class="admin-photo-picker"><label for="productImageFile">Product photos</label><input id="productImageFile" class="form-control" type="file" accept="image/png,image/jpeg,image/webp" multiple disabled><small>At least one photo is required for a new listing. Select up to 8 PNG, JPG or WebP photos · up to 8 MB each. Selected photos upload to Cloudinary.</small><div class="admin-image-preview-row"><img id="productImagePreview" class="product-image-preview" alt="Product image preview" hidden><span id="productImageUploadStatus" class="image-upload-status" role="status" aria-live="polite"></span></div></div>
       <input id="productImageUrl" type="hidden" name="imageUrl" value="">
       <input id="productImagePublicId" type="hidden" name="imagePublicId" value="">
       <input id="productImages" type="hidden" name="images" value="[]">
       <label class="admin-check"><input type="checkbox" name="featured" value="1"><span>Feature this product on the shop</span></label>
-      <label class="admin-check"><input type="checkbox" name="isSecondHand" value="1"><span class="admin-check-copy">Second-hand / pre-owned item<small class="admin-check-help">Shows a clear pre-owned label to shoppers and on invoices.</small></span></label>
+      <label class="admin-check"><input type="checkbox" name="isSecondHand" value="1"><span class="admin-check-copy">Second hand item<small class="admin-check-help">Displays the item condition to shoppers and on order invoices.</small></span></label>
+      <div id="secondHandDetails" class="second-hand-product-fields" hidden>
+        <label>Condition grade<select name="conditionGrade" class="form-control"><option value="">Choose the item's condition</option><option value="like-new">Like new</option><option value="good">Good</option><option value="fair">Fair</option><option value="for-parts">For parts or repair</option></select></label>
+        <label>Condition details<textarea class="form-control" name="conditionNotes" rows="3" maxlength="500" placeholder="Describe visible wear, defects, missing parts, or repairs."></textarea><small>Be specific about anything that may affect the buyer's decision.</small></label>
+      </div>
       <div class="admin-dialog-actions"><button class="btn btn-subtle" type="button" data-close-dialog>Cancel</button><button class="btn btn-primary" type="submit" id="saveProductButton" disabled>Add to catalog <span>→</span></button></div>
     </form>
   </dialog>
